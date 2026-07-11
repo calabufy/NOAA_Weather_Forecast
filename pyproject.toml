@@ -2,3 +2,30 @@
 # Здесь объявляются: aiogram 3.x (бот), httpx + tenacity (HTTP-запросы с ретраями),
 # APScheduler (планировщик джобов в том же asyncio-loop), а также dev-зависимости
 # для тестов (pytest) и линтинга. Единая точка конфигурации сборки и инструментов.
+
+[project]
+name = "la-weather-forecast"
+version = "0.1.0"
+description = "Прогноз Tmax на станции KLAX (NOAA) с Telegram-ботом и статистикой ошибок"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",       # HTTP-клиент (sync + streaming для bulk-файлов NBS)
+    "tenacity>=8.2",     # ретраи с экспоненциальным бэкоффом на внешние запросы
+    "aiogram>=3.4",      # Telegram-бот (long polling) — Фаза 4
+    "apscheduler>=3.10", # планировщик джобов fetch/verify — Фаза 2
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
