@@ -1,0 +1,10 @@
+# .gitignore — что не попадает в репозиторий.
+# Секреты (.env), файлы БД (*.db), кэши Python и артефакты инструментов.
+
+.env
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

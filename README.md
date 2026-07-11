@@ -49,8 +49,8 @@
 
 ```
                 ┌──────────────────────────────────────────┐
-                │                Scheduler                  │
-                │              (APScheduler)                │
+                │                Scheduler                 │
+                │              (APScheduler)               │
                 └──────┬───────────────┬───────────────────┘
                        │               │
              ┌─────────▼────────┐ ┌────▼─────────────┐
@@ -171,7 +171,69 @@ CREATE TABLE actuals (
 
 ---
 
-## 9. План работ по фазам
+## 9. Структура проекта
+
+```
+LA_Weather_Forecast/
+├── README.md                  # этот план
+├── pyproject.toml             # зависимости и метаданные проекта (uv/pip)
+├── .env.example               # шаблон конфига: BOT_TOKEN, ALLOWED_CHAT_IDS, DB_PATH
+├── .gitignore                 # .env, *.db, __pycache__ и т.п.
+├── Dockerfile
+├── docker-compose.yml         # сервис + volume под SQLite
+│
+├── app/
+│   ├── __init__.py
+│   ├── main.py                # точка входа: поднимает бота и APScheduler в одном asyncio-loop
+│   ├── config.py              # чтение .env, константы (станция KLAX, таймзона, URL источников)
+│   ├── timeutil.py            # «климатические сутки» LA: границы суток, target-дата «завтра», DST
+│   │
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── schema.sql         # CREATE TABLE forecasts / actuals (см. раздел 4)
+│   │   └── repo.py            # инициализация БД, идемпотентные upsert'ы, выборки
+│   │
+│   ├── sources/
+│   │   ├── __init__.py
+│   │   ├── nbm.py             # скачивание и парсинг бюллетеня NBM (NBS) для KLAX
+│   │   ├── mav.py             # скачивание и парсинг бюллетеня GFS MOS (MAV)
+│   │   ├── nws.py             # api.weather.gov: point forecast (опц.) и METAR-наблюдения
+│   │   └── cli_report.py      # парсинг NWS CLI-отчёта (CLILAX) — фактический Tmax
+│   │
+│   ├── jobs/
+│   │   ├── __init__.py
+│   │   ├── fetch_forecasts.py # Forecast Fetcher: циклы 00Z/12Z → forecasts
+│   │   ├── verify.py          # Verification Job: CLI → actuals, fallback METAR, перезапись
+│   │   └── scheduler.py       # регистрация джобов в APScheduler, ретраи/повторы
+│   │
+│   ├── metrics.py             # MAE, ME, RMSE, hit rate по окнам 7д/30д/сезон/год
+│   │
+│   └── bot/
+│       ├── __init__.py
+│       ├── handlers.py        # /start, /forecast, /errors
+│       ├── formatting.py      # °F→°C, моноширинные таблицы метрик
+│       └── middleware.py      # allowlist chat_id, алерты об ошибках пайплайна в чат
+│
+├── scripts/
+│   └── backfill.py            # разовый бэкфилл фактов из CF6/CLI-архива
+│
+└── tests/
+    ├── fixtures/              # реальные образцы бюллетеней NBM/MAV/CLI
+    ├── test_parsers.py        # парсеры на образцах, в т.ч. «сломанный» формат
+    ├── test_timeutil.py       # границы суток, DST-переходы
+    ├── test_metrics.py        # агрегации на синтетике: пропуски, граница сезона/года
+    └── test_repo.py           # идемпотентность записи, правило «зачётного» прогноза
+```
+
+Принципы разбиения:
+- **`sources/`** — только скачивание и парсинг, без записи в БД: каждый модуль возвращает чистые данные, что упрощает юнит-тесты на образцах.
+- **`jobs/`** — оркестрация: source → repo, ретраи, идемпотентность.
+- **`metrics.py`** — чистые функции над выборками из БД, считаются на лету при `/errors` (раздел 3).
+- **`bot/`** ничего не знает об источниках — только читает БД через `repo` и `metrics`.
+
+---
+
+## 10. План работ по фазам
 
 ### Фаза 0 — подготовка (0.5 дня)
 - [ ] Создать бота у BotFather, получить токен.
@@ -204,7 +266,7 @@ CREATE TABLE actuals (
 
 ---
 
-## 10. Риски и открытые вопросы
+## 11. Риски и открытые вопросы
 
 | Риск / вопрос | Митигация |
 |---|---|
@@ -217,7 +279,7 @@ CREATE TABLE actuals (
 
 ---
 
-## 11. Что пересмотреть при росте системы
+## 12. Что пересмотреть при росте системы
 
 - SQLite → Postgres при нескольких станциях/пользователях или конкурентной записи.
 - Long polling → webhook при публичном хостинге.
