@@ -153,6 +153,42 @@ def get_actual(conn: sqlite3.Connection, d: date) -> ActualTmax | None:
     )
 
 
+def list_actuals(
+    conn: sqlite3.Connection, start: date, end: date
+) -> list[ActualTmax]:
+    """Все факты с датой в [start, end] включительно, по возрастанию даты."""
+    rows = conn.execute(
+        """
+        SELECT date, tmax_f, source FROM actuals
+        WHERE date BETWEEN ? AND ?
+        ORDER BY date
+        """,
+        (_fmt_date(start), _fmt_date(end)),
+    ).fetchall()
+    return [
+        ActualTmax(date=date.fromisoformat(r["date"]), tmax_f=r["tmax_f"],
+                   source=r["source"])
+        for r in rows
+    ]
+
+
+def error_series(
+    conn: sqlite3.Connection, model: str, start: date, end: date
+) -> list[tuple[date, float, float]]:
+    """Пары (дата, зачётный_прогноз_f, факт_f) за [start, end] для модели.
+
+    Только дни с полными данными: есть и факт, и «зачётный» прогноз (последний
+    цикл до local midnight). Заготовка для метрик (app/metrics.py) и команды
+    /errors — сама агрегация чистая и живёт в metrics.
+    """
+    out: list[tuple[date, float, float]] = []
+    for actual in list_actuals(conn, start, end):
+        fc = official_forecast(conn, actual.date, model)
+        if fc is not None:
+            out.append((actual.date, fc.tmax_f, actual.tmax_f))
+    return out
+
+
 def _row_to_forecast(row: sqlite3.Row) -> ForecastPoint:
     return ForecastPoint(
         target_date=date.fromisoformat(row["target_date"]),
