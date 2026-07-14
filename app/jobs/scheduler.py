@@ -3,8 +3,9 @@
 # и запускает их в том же asyncio-loop, что и бот (Фаза 4).
 #
 # Джобы синхронные (blocking httpx), поэтому в async-loop их выполняем через
-# asyncio.to_thread, не блокируя цикл событий. Каждый запуск открывает своё
-# соединение с SQLite (безопасно между потоками), делает работу и закрывает его.
+# asyncio.to_thread, не блокируя цикл событий. Соединение с SQLite открывается
+# ВНУТРИ рабочего потока (своё на каждый запуск) и там же закрывается — так оно
+# не пересекает границу потоков (sqlite3 check_same_thread) и не конфликтует.
 # Ретраи внешних запросов обеспечивает tenacity в HTTP-слое источников; здесь —
 # несколько запусков в течение суток (см. config.FETCH_HOURS_LA/VERIFY_HOURS_LA),
 # что и даёт «повторные попытки», а идемпотентность записи не создаёт дублей.
@@ -21,20 +22,31 @@ from app.jobs import fetch_forecasts, verify
 log = logging.getLogger(__name__)
 
 
-async def _run_fetch(db_path: str) -> None:
+def _fetch_sync(db_path: str) -> None:
     conn = repo.connect(db_path)
     try:
-        await asyncio.to_thread(fetch_forecasts.run, conn)
+        fetch_forecasts.run(conn)
     finally:
         conn.close()
+
+
+def _verify_sync(db_path: str) -> None:
+    conn = repo.connect(db_path)
+    try:
+        verify.run(conn)
+    finally:
+        conn.close()
+
+
+async def _run_fetch(db_path: str) -> None:
+    # Соединение открываем ВНУТРИ рабочего потока (to_thread), а не в loop-потоке:
+    # sqlite3 по умолчанию check_same_thread=True, и переиспользование соединения
+    # из чужого потока даёт ProgrammingError. Каждая сессия — свой connect/close.
+    await asyncio.to_thread(_fetch_sync, db_path)
 
 
 async def _run_verify(db_path: str) -> None:
-    conn = repo.connect(db_path)
-    try:
-        await asyncio.to_thread(verify.run, conn)
-    finally:
-        conn.close()
+    await asyncio.to_thread(_verify_sync, db_path)
 
 
 def build_scheduler(db_path: str | None = None):

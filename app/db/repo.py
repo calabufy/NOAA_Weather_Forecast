@@ -138,6 +138,29 @@ def official_forecast(
     return _row_to_forecast(row) if row else None
 
 
+def latest_forecast(
+    conn: sqlite3.Connection, target_date: date, model: str
+) -> ForecastPoint | None:
+    """Самый свежий прогноз на target_date (последний по циклу), для показа в боте.
+
+    В отличие от official_forecast здесь НЕТ отсечки «до local midnight»: команда
+    /forecast показывает пользователю актуальнейший собранный прогноз на завтра,
+    а не «зачётный» для метрик. Для target-даты «завтра» оба правила обычно дают
+    один и тот же цикл, но семантику показа держим отдельной от верификации.
+    """
+    row = conn.execute(
+        """
+        SELECT target_date, model, cycle, tmax_f
+        FROM forecasts
+        WHERE target_date = ? AND model = ?
+        ORDER BY cycle DESC
+        LIMIT 1
+        """,
+        (_fmt_date(target_date), model),
+    ).fetchone()
+    return _row_to_forecast(row) if row else None
+
+
 def get_actual(conn: sqlite3.Connection, d: date) -> ActualTmax | None:
     """Фактический Tmax локальных суток d, если он записан."""
     row = conn.execute(

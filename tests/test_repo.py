@@ -77,6 +77,26 @@ def test_official_forecast_none_when_no_eligible_cycle(conn):
     assert repo.official_forecast(conn, target, "NBM") is None
 
 
+# --- latest_forecast: свежайший цикл для показа в боте (без отсечки полуночи) --
+
+def test_latest_forecast_ignores_midnight_cutoff(conn):
+    target = date(2026, 7, 12)
+    # Цикл после local midnight target-даты: official_forecast его отсекает,
+    # а latest_forecast (для /forecast) должен вернуть как самый свежий.
+    for cyc, tmax in [
+        (datetime(2026, 7, 12, 0, tzinfo=UTC), 84.0),
+        (datetime(2026, 7, 12, 12, tzinfo=UTC), 88.0),  # свежайший
+    ]:
+        repo.upsert_forecast(conn, _fp(target, cyc, tmax))
+    fc = repo.latest_forecast(conn, target, "NBM")
+    assert fc is not None and fc.tmax_f == 88.0
+    assert fc.cycle == datetime(2026, 7, 12, 12, tzinfo=UTC)
+
+
+def test_latest_forecast_none_when_empty(conn):
+    assert repo.latest_forecast(conn, date(2026, 7, 12), "NBM") is None
+
+
 # --- Факты: приоритет CLI над METAR ----------------------------------------
 
 def test_metar_then_cli_overwrites(conn):

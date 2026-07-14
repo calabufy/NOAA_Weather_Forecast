@@ -13,6 +13,7 @@ dependencies = [
     "tenacity>=8.2",     # ретраи с экспоненциальным бэкоффом на внешние запросы
     "aiogram>=3.4",      # Telegram-бот (long polling) — Фаза 4
     "apscheduler>=3.10", # планировщик джобов fetch/verify — Фаза 2
+    "python-dotenv>=1.0", # загрузка .env в окружение при локальном запуске
 ]
 
 [project.optional-dependencies]
