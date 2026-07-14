@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 
 from app import config, metrics, timeutil
 from app.bot import formatting
@@ -23,17 +23,36 @@ from app.db import repo
 log = logging.getLogger(__name__)
 router = Router()
 
-_HELP = (
+# Подсказки команд в меню Telegram (кнопка «/» слева от поля ввода).
+# Порядок = порядок отображения; регистрируются на старте в main.py.
+BOT_COMMANDS = [
+    BotCommand(command="forecast", description="Прогноз Tmax на завтра (NBM, MAV)"),
+    BotCommand(command="errors", description="Метрики ошибок по окнам"),
+    BotCommand(command="help", description="Справка: модели, метрики, циклы"),
+    BotCommand(command="start", description="Краткая справка"),
+]
+
+
+async def setup_commands(bot: Bot) -> None:
+    """Зарегистрировать список команд в меню бота (идемпотентно)."""
+    await bot.set_my_commands(BOT_COMMANDS)
+
+_START = (
     "Прогноз Tmax по станции KLAX (Лос-Анджелес) и статистика ошибок моделей.\n\n"
     "<b>/forecast</b> — прогноз максимума на завтра (NBM и MAV).\n"
     "<b>/errors</b> — метрики качества по окнам 7д/30д/сезон/год.\n"
-    "<b>/start</b> — эта справка."
+    "<b>/help</b> — подробная справка: модели, метрики, расписание циклов."
 )
 
 
-@router.message(Command("start", "help"))
+@router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    await message.answer(_HELP)
+    await message.answer(_START)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(formatting.format_help())
 
 
 @router.message(Command("forecast"))

@@ -58,6 +58,7 @@ async def run() -> None:
         # Снимаем webhook (если был) и отбрасываем накопившиеся апдейты —
         # иначе зарегистрированный webhook конфликтует с long polling.
         await bot.delete_webhook(drop_pending_updates=True)
+        await handlers.setup_commands(bot)
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
