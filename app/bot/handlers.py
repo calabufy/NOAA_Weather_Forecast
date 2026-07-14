@@ -17,7 +17,7 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
 from app import config, metrics, timeutil
-from app.bot import formatting
+from app.bot import formatting, live
 from app.db import repo
 
 log = logging.getLogger(__name__)
@@ -57,15 +57,9 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("forecast"))
 async def cmd_forecast(message: Message) -> None:
-    target = timeutil.la_tomorrow()
-    conn = repo.connect()
-    try:
-        points = {
-            model: repo.latest_forecast(conn, target, model)
-            for model in config.BOT_MODELS
-        }
-    finally:
-        conn.close()
+    # Ленивый забор свежего цикла в момент запроса (не из БД): пользователю нужен
+    # актуальнейший прогноз, а не «зачётный». Кэш в live гасит повторные заборы.
+    target, points = await live.forecast_tomorrow()
     await message.answer(formatting.format_forecast(target, points))
 
 
