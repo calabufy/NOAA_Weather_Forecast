@@ -55,6 +55,9 @@ async def run() -> None:
     scheduler.start()
     log.info("сервис запущен: бот (long polling) + планировщик джобов")
     try:
+        # Снимаем webhook (если был) и отбрасываем накопившиеся апдейты —
+        # иначе зарегистрированный webhook конфликтует с long polling.
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
