@@ -59,7 +59,13 @@ async def cmd_help(message: Message) -> None:
 async def cmd_forecast(message: Message) -> None:
     # Ленивый забор свежего цикла в момент запроса (не из БД): пользователю нужен
     # актуальнейший прогноз, а не «зачётный». Кэш в live гасит повторные заборы.
-    target, points = await live.forecast_tomorrow()
+    # Забор может занять секунды (качаем бюллетень) — показываем плашку загрузки,
+    # затем удаляем её и шлём готовый прогноз.
+    loading = await message.answer("Загрузка прогноза...")
+    try:
+        target, points = await live.forecast_tomorrow()
+    finally:
+        await loading.delete()
     await message.answer(formatting.format_forecast(target, points))
 
 
