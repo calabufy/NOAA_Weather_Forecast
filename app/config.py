@@ -94,22 +94,6 @@ METAR_URL_TEMPLATE = os.getenv(
 # Доступные циклы моделей (UTC-часы выпуска).
 MODEL_CYCLES = ("00", "06", "12", "18")
 
-# --- Polymarket (данные рынка ставок на Tmax LA) -----------------------------
-# Ежедневное событие «Highest temperature in Los Angeles on <date>?» резолвится
-# по той же станции KLAX (Wunderground, целые °F), что и наши прогнозы/факты.
-# Gamma API — публичный read-only без ключа; slug события строится из даты.
-POLYMARKET_API_URL_TEMPLATE = os.getenv(
-    "POLYMARKET_API_URL_TEMPLATE",
-    "https://gamma-api.polymarket.com/events?slug={slug}",
-)
-POLYMARKET_SLUG_TEMPLATE = os.getenv(
-    "POLYMARKET_SLUG_TEMPLATE",
-    "highest-temperature-in-los-angeles-on-{month}-{day}-{year}",
-)
-POLYMARKET_EVENT_URL_TEMPLATE = os.getenv(
-    "POLYMARKET_EVENT_URL_TEMPLATE", "https://polymarket.com/event/{slug}"
-)
-
 # --- База данных -----------------------------------------------------------
 # Путь к файлу SQLite. По умолчанию — в корне проекта; в Docker монтируется на
 # volume. Хранит forecasts и actuals (см. app/db/schema.sql).

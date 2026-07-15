@@ -12,15 +12,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from datetime import date
 
 from app import config, timeutil
 from app.jobs.fetch_forecasts import latest_cycle
-from app.sources import ForecastPoint, fetch_all_isolated, polymarket
-
-log = logging.getLogger(__name__)
+from app.sources import ForecastPoint, fetch_all_isolated
 
 # Кэш: (run_date, cycle) -> (monotonic-время забора, {model: list[ForecastPoint]}).
 # Актуален всегда только текущий цикл, поэтому при записи чистим прочие ключи.
@@ -73,18 +70,3 @@ async def forecast_tomorrow() -> tuple[date, dict[str, ForecastPoint | None]]:
         )
         for model in config.BOT_MODELS
     }
-
-
-async def market_for(target: date) -> polymarket.TempMarket | None:
-    """Рынок Polymarket на сутки target; None при отсутствии или сбое.
-
-    Рынок — вспомогательные данные при прогнозе: его недоступность не должна
-    мешать /forecast, поэтому все исключения гасятся здесь. Логгер app.bot.*
-    не входит в белый список алертов — сбой стороннего API не будит владельца.
-    Ответ маленький и не кэшируется: цены меняются быстрее прогнозов.
-    """
-    try:
-        return await asyncio.to_thread(polymarket.fetch_market, target)
-    except Exception:  # noqa: BLE001 — сбой рынка не должен ронять /forecast
-        log.exception("забор рынка Polymarket за %s не удался", target.isoformat())
-        return None
