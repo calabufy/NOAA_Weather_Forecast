@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import date, timedelta
 
 from app import timeutil
@@ -45,7 +46,9 @@ def _try_metar(d: date) -> ActualTmax | None:
         return None
 
 
-def run(conn, target_date: date | None = None) -> ActualTmax | None:
+def run(
+    conn: sqlite3.Connection, target_date: date | None = None
+) -> ActualTmax | None:
     """Записать фактический Tmax за сутки target_date (по умолчанию — вчера).
 
     Приоритет: CLI (канонический) -> METAR (fallback). Запись через

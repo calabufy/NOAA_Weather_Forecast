@@ -127,3 +127,37 @@ def test_metar_refreshes_metar(conn):
 
 def test_get_actual_none_when_absent(conn):
     assert repo.get_actual(conn, date(2026, 1, 1)) is None
+
+
+def test_error_series_excludes_cycle_at_local_midnight(conn):
+    target = date(2026, 7, 12)
+    repo.upsert_actual(conn, ActualTmax(target, 80.0, "CLI"))
+    repo.upsert_forecast(
+        conn, _fp(target, datetime(2026, 7, 12, 0, tzinfo=UTC), 84.0)
+    )
+    repo.upsert_forecast(
+        conn, _fp(target, datetime(2026, 7, 12, 7, tzinfo=UTC), 99.0)
+    )
+
+    assert repo.error_series(conn, "NBM", target, target) == [
+        (target, 84.0, 80.0)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("target", "midnight_utc"),
+    [
+        (date(2026, 3, 8), datetime(2026, 3, 8, 8, tzinfo=UTC)),
+        (date(2026, 11, 1), datetime(2026, 11, 1, 7, tzinfo=UTC)),
+    ],
+)
+def test_error_series_midnight_cutoff_is_dst_aware(conn, target, midnight_utc):
+    repo.upsert_actual(conn, ActualTmax(target, 70.0, "CLI"))
+    repo.upsert_forecast(conn, _fp(target, midnight_utc, 99.0))
+    repo.upsert_forecast(
+        conn, _fp(target, midnight_utc.replace(hour=0), 72.0)
+    )
+
+    assert repo.error_series(conn, "NBM", target, target) == [
+        (target, 72.0, 70.0)
+    ]

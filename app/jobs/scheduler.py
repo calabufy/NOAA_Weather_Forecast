@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from app import config
 from app.db import repo
@@ -21,35 +24,28 @@ from app.jobs import fetch_forecasts, verify
 
 log = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-def _fetch_sync(db_path: str) -> None:
+JobRun = Callable[[sqlite3.Connection], object]
+
+
+def _run_sync(job_run: JobRun, db_path: str) -> None:
     conn = repo.connect(db_path)
     try:
-        fetch_forecasts.run(conn)
+        job_run(conn)
     finally:
         conn.close()
 
 
-def _verify_sync(db_path: str) -> None:
-    conn = repo.connect(db_path)
-    try:
-        verify.run(conn)
-    finally:
-        conn.close()
-
-
-async def _run_fetch(db_path: str) -> None:
+async def _run_job(job_run: JobRun, db_path: str) -> None:
     # Соединение открываем ВНУТРИ рабочего потока (to_thread), а не в loop-потоке:
     # sqlite3 по умолчанию check_same_thread=True, и переиспользование соединения
     # из чужого потока даёт ProgrammingError. Каждая сессия — свой connect/close.
-    await asyncio.to_thread(_fetch_sync, db_path)
+    await asyncio.to_thread(_run_sync, job_run, db_path)
 
 
-async def _run_verify(db_path: str) -> None:
-    await asyncio.to_thread(_verify_sync, db_path)
-
-
-def build_scheduler(db_path: str | None = None):
+def build_scheduler(db_path: str | None = None) -> "AsyncIOScheduler":
     """Создать AsyncIOScheduler с зарегистрированными джобами (не запущен).
 
     Вызывающий (main.py на Фазе 4) делает scheduler.start() внутри работающего
@@ -63,17 +59,18 @@ def build_scheduler(db_path: str | None = None):
     scheduler = AsyncIOScheduler(timezone=config.TZ)
 
     scheduler.add_job(
-        _run_fetch, CronTrigger(hour=",".join(map(str, config.FETCH_HOURS_LA)),
-                                minute=30, timezone=config.TZ),
-        args=[db_path], id="fetch_forecasts", max_instances=1,
+        _run_job, CronTrigger(hour=",".join(map(str, config.FETCH_HOURS_LA)),
+                              minute=config.FETCH_MINUTE, timezone=config.TZ),
+        args=[fetch_forecasts.run, db_path], id="fetch_forecasts", max_instances=1,
         coalesce=True, misfire_grace_time=3600,
     )
     scheduler.add_job(
-        _run_verify, CronTrigger(hour=",".join(map(str, config.VERIFY_HOURS_LA)),
-                                 minute=0, timezone=config.TZ),
-        args=[db_path], id="verify", max_instances=1,
+        _run_job, CronTrigger(hour=",".join(map(str, config.VERIFY_HOURS_LA)),
+                              minute=config.VERIFY_MINUTE, timezone=config.TZ),
+        args=[verify.run, db_path], id="verify", max_instances=1,
         coalesce=True, misfire_grace_time=3600,
     )
-    log.info("джобы запланированы: fetch@%s:30, verify@%s:00 (%s)",
-             config.FETCH_HOURS_LA, config.VERIFY_HOURS_LA, config.TZ)
+    log.info("джобы запланированы: fetch@%s:%02d, verify@%s:%02d (%s)",
+             config.FETCH_HOURS_LA, config.FETCH_MINUTE,
+             config.VERIFY_HOURS_LA, config.VERIFY_MINUTE, config.TZ)
     return scheduler

@@ -11,11 +11,12 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 from app import config
 from app.db import repo
-from app.sources import mav, met, nbm
+from app.sources import fetch_all_isolated
 
 UTC = timezone.utc
 log = logging.getLogger(__name__)
@@ -33,24 +34,11 @@ def latest_cycle(now: datetime | None = None) -> tuple[date, str]:
     return ref.date(), f"{cyc_hour:02d}"
 
 
-def _fetch_model(conn, model: str, points_fn) -> int:
-    """Собрать и записать прогнозы одной модели; вернуть число строк.
-
-    Любая ошибка (сеть, разбор) не пробрасывается: логируется и возвращается 0,
-    чтобы сбой одной модели не рушил весь цикл сбора.
-    """
-    try:
-        points = points_fn()
-    except Exception:  # noqa: BLE001 — намеренно широко: джоб не должен падать
-        log.exception("сбор прогноза %s не удался", model)
-        return 0
-    n = repo.upsert_forecasts(conn, points)
-    log.info("записано прогнозов %s: %d (дни %s)", model, n,
-             ", ".join(sorted(p.target_date.isoformat() for p in points)) or "—")
-    return n
-
-
-def run(conn, run_date: date | None = None, cycle: str | None = None) -> dict[str, int]:
+def run(
+    conn: sqlite3.Connection,
+    run_date: date | None = None,
+    cycle: str | None = None,
+) -> dict[str, int]:
     """Собрать NBM, MAV и MET за (run_date, cycle) и записать в БД.
 
     run_date/cycle=None -> берётся свежий доступный цикл (latest_cycle).
@@ -59,11 +47,14 @@ def run(conn, run_date: date | None = None, cycle: str | None = None) -> dict[st
     if run_date is None or cycle is None:
         run_date, cycle = latest_cycle()
     log.info("сбор прогнозов за цикл %s %sZ", run_date.isoformat(), cycle)
-    return {
-        nbm.MODEL: _fetch_model(conn, nbm.MODEL,
-                                lambda: nbm.fetch_forecast(run_date, cycle)),
-        mav.MODEL: _fetch_model(conn, mav.MODEL,
-                                lambda: mav.fetch_forecast(cycle)),
-        met.MODEL: _fetch_model(conn, met.MODEL,
-                                lambda: met.fetch_forecast(cycle)),
-    }
+    fetched = fetch_all_isolated(run_date, cycle)
+    counts: dict[str, int] = {}
+    for model, points in fetched.items():
+        counts[model] = repo.upsert_forecasts(conn, points)
+        log.info(
+            "записано прогнозов %s: %d (дни %s)",
+            model,
+            counts[model],
+            ", ".join(sorted(p.target_date.isoformat() for p in points)) or "—",
+        )
+    return counts

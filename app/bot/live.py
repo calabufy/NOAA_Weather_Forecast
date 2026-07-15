@@ -18,7 +18,7 @@ from datetime import date
 
 from app import config, timeutil
 from app.jobs.fetch_forecasts import latest_cycle
-from app.sources import ForecastPoint, mav, met, nbm
+from app.sources import ForecastPoint, fetch_all_isolated, polymarket
 
 log = logging.getLogger(__name__)
 
@@ -29,24 +29,12 @@ _lock = asyncio.Lock()
 
 
 def _fetch_all(run_date: date, cycle: str) -> dict[str, list[ForecastPoint]]:
-    """Синхронно забрать NBM и MAV за цикл; сбой каждой модели изолирован.
+    """Синхронно забрать все модели; сбой каждой модели изолирован.
 
     Возвращает {model: list[ForecastPoint]}; при сбое модели — пустой список.
     Блокирует поток (httpx) — вызывать только через asyncio.to_thread.
     """
-    sources = (
-        (nbm.MODEL, lambda: nbm.fetch_forecast(run_date, cycle)),
-        (mav.MODEL, lambda: mav.fetch_forecast(cycle)),
-        (met.MODEL, lambda: met.fetch_forecast(cycle)),
-    )
-    out: dict[str, list[ForecastPoint]] = {}
-    for model, fetch in sources:
-        try:
-            out[model] = fetch()
-        except Exception:  # noqa: BLE001 — сбой модели не должен ронять /forecast
-            log.exception("ленивый сбор прогноза %s не удался", model)
-            out[model] = []
-    return out
+    return fetch_all_isolated(run_date, cycle)
 
 
 async def _fetch_cached(run_date: date, cycle: str) -> dict[str, list[ForecastPoint]]:
@@ -85,3 +73,18 @@ async def forecast_tomorrow() -> tuple[date, dict[str, ForecastPoint | None]]:
         )
         for model in config.BOT_MODELS
     }
+
+
+async def market_for(target: date) -> polymarket.TempMarket | None:
+    """Рынок Polymarket на сутки target; None при отсутствии или сбое.
+
+    Рынок — вспомогательные данные при прогнозе: его недоступность не должна
+    мешать /forecast, поэтому все исключения гасятся здесь. Логгер app.bot.*
+    не входит в белый список алертов — сбой стороннего API не будит владельца.
+    Ответ маленький и не кэшируется: цены меняются быстрее прогнозов.
+    """
+    try:
+        return await asyncio.to_thread(polymarket.fetch_market, target)
+    except Exception:  # noqa: BLE001 — сбой рынка не должен ронять /forecast
+        log.exception("забор рынка Polymarket за %s не удался", target.isoformat())
+        return None

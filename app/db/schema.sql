@@ -9,7 +9,7 @@
 CREATE TABLE IF NOT EXISTS forecasts (
     id           INTEGER PRIMARY KEY,
     target_date  TEXT NOT NULL,   -- локальная дата LA, YYYY-MM-DD
-    model        TEXT NOT NULL,   -- 'NBM' | 'MAV' | 'NWS'
+    model        TEXT NOT NULL,   -- 'NBM' | 'MAV' | 'MET'
     cycle        TEXT NOT NULL,   -- цикл модели, ISO-UTC 'YYYY-MM-DDTHH:MMZ'
     tmax_f       REAL NOT NULL,   -- прогноз Tmax, °F
     fetched_at   TEXT NOT NULL,   -- момент записи, ISO-UTC

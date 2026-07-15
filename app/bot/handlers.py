@@ -11,10 +11,11 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, LinkPreviewOptions, Message
 
 from app import config, metrics, timeutil
 from app.bot import formatting, live
@@ -26,7 +27,8 @@ router = Router()
 # Подсказки команд в меню Telegram (кнопка «/» слева от поля ввода).
 # Порядок = порядок отображения; регистрируются на старте в main.py.
 BOT_COMMANDS = [
-    BotCommand(command="forecast", description="Прогноз Tmax на завтра (NBM, MAV, MET)"),
+    BotCommand(command="forecast",
+               description="Прогноз Tmax на завтра (NBM, MAV, MET) + Polymarket"),
     BotCommand(command="errors", description="Метрики ошибок по окнам"),
     BotCommand(command="help", description="Справка: модели, метрики, циклы"),
     BotCommand(command="start", description="Краткая справка"),
@@ -60,13 +62,26 @@ async def cmd_forecast(message: Message) -> None:
     # Ленивый забор свежего цикла в момент запроса (не из БД): пользователю нужен
     # актуальнейший прогноз, а не «зачётный». Кэш в live гасит повторные заборы.
     # Забор может занять секунды (качаем бюллетень) — показываем плашку загрузки,
-    # затем удаляем её и шлём готовый прогноз.
+    # затем удаляем её и шлём готовый прогноз. Рядом с прогнозом — рынок
+    # Polymarket на те же сутки (live.market_for сам гасит свои сбои -> None).
     loading = await message.answer("Загрузка прогноза...")
     try:
         target, points = await live.forecast_tomorrow()
+        market = await live.market_for(target)
+    except Exception:  # noqa: BLE001 — пользователь должен получить ответ при сбое
+        log.exception("сбой /forecast")
+        await message.answer("Не удалось получить прогноз, попробуйте позже.")
+        return
     finally:
-        await loading.delete()
-    await message.answer(formatting.format_forecast(target, points))
+        with suppress(Exception):
+            await loading.delete()
+    await message.answer(
+        formatting.format_forecast(target, points)
+        + "\n\n"
+        + formatting.format_market(market, points),
+        # Без превью: ссылка на Polymarket разворачивалась бы в громоздкую карточку.
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 @router.message(Command("errors"))
@@ -80,9 +95,13 @@ async def cmd_errors(message: Message) -> None:
 
     conn = repo.connect()
     try:
+        actuals = repo.list_actuals(conn, earliest, end)
         reports = {
             model: metrics.report(
-                repo.error_series(conn, model, earliest, end), ref
+                repo.error_series(
+                    conn, model, earliest, end, actuals=actuals
+                ),
+                ref,
             )
             for model in config.BOT_MODELS
         }

@@ -41,7 +41,6 @@ def local_day_bounds(d: date) -> tuple[datetime, datetime]:
     Корректно на DST: длина суток может быть 23 или 25 часов.
     """
     start_local = datetime(d.year, d.month, d.day, tzinfo=LA)
-    end_local = start_local + timedelta(days=1)
     # Пересобираем end из календарной даты, чтобы DST-переход учёлся зоной,
     # а не механическим прибавлением 24 часов.
     nd = d + timedelta(days=1)

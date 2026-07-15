@@ -6,7 +6,7 @@
 import asyncio
 from datetime import date, datetime, timezone
 
-from app import config
+from app import sources
 from app.bot import live
 from app.sources import ForecastPoint
 
@@ -27,17 +27,17 @@ def _setup(monkeypatch, *, run_date=date(2026, 7, 14), cycle="18",
     monkeypatch.setattr(live.timeutil, "la_tomorrow", lambda: tomorrow)
     # MET входит в BOT_MODELS -> _fetch_all его дёрнет; по умолчанию глушим в сеть,
     # тесты, которым MET важен, переопределяют этот патч.
-    monkeypatch.setattr(live.met, "fetch_forecast", lambda c: [])
+    monkeypatch.setitem(sources.SOURCES, "MET", lambda d, c: [])
 
 
 def test_picks_tomorrow_from_fresh_cycle(monkeypatch):
     _setup(monkeypatch)
     # В бюллетене несколько дней — берём именно завтрашний.
-    monkeypatch.setattr(live.nbm, "fetch_forecast", lambda d, c: [
+    monkeypatch.setitem(sources.SOURCES, "NBM", lambda d, c: [
         _fp("NBM", date(2026, 7, 14), 77.0),
         _fp("NBM", TOMORROW, 81.0),
     ])
-    monkeypatch.setattr(live.mav, "fetch_forecast", lambda c: [
+    monkeypatch.setitem(sources.SOURCES, "MAV", lambda d, c: [
         _fp("MAV", TOMORROW, 78.0),
     ])
     target, points = asyncio.run(live.forecast_tomorrow())
@@ -52,8 +52,8 @@ def test_model_failure_isolated(monkeypatch):
     def boom(*_a):
         raise RuntimeError("сеть легла")
 
-    monkeypatch.setattr(live.nbm, "fetch_forecast", boom)
-    monkeypatch.setattr(live.mav, "fetch_forecast", lambda c: [_fp("MAV", TOMORROW, 78.0)])
+    monkeypatch.setitem(sources.SOURCES, "NBM", boom)
+    monkeypatch.setitem(sources.SOURCES, "MAV", lambda d, c: [_fp("MAV", TOMORROW, 78.0)])
     _target, points = asyncio.run(live.forecast_tomorrow())
     assert points["NBM"] is None            # упавшая модель -> «—»
     assert points["MAV"].tmax_f == 78.0     # вторая отработала
@@ -62,9 +62,9 @@ def test_model_failure_isolated(monkeypatch):
 def test_missing_tomorrow_gives_none(monkeypatch):
     _setup(monkeypatch)
     # Свежий цикл есть, но колонки на завтра в нём нет.
-    monkeypatch.setattr(live.nbm, "fetch_forecast",
+    monkeypatch.setitem(sources.SOURCES, "NBM",
                         lambda d, c: [_fp("NBM", date(2026, 7, 14), 77.0)])
-    monkeypatch.setattr(live.mav, "fetch_forecast", lambda c: [])
+    monkeypatch.setitem(sources.SOURCES, "MAV", lambda d, c: [])
     _target, points = asyncio.run(live.forecast_tomorrow())
     assert points["NBM"] is None
     assert points["MAV"] is None
@@ -78,12 +78,12 @@ def test_cache_hit_skips_refetch(monkeypatch):
         calls["nbm"] += 1
         return [_fp("NBM", TOMORROW, 81.0)]
 
-    def mav_fetch(c):
+    def mav_fetch(d, c):
         calls["mav"] += 1
         return [_fp("MAV", TOMORROW, 78.0)]
 
-    monkeypatch.setattr(live.nbm, "fetch_forecast", nbm_fetch)
-    monkeypatch.setattr(live.mav, "fetch_forecast", mav_fetch)
+    monkeypatch.setitem(sources.SOURCES, "NBM", nbm_fetch)
+    monkeypatch.setitem(sources.SOURCES, "MAV", mav_fetch)
 
     asyncio.run(live.forecast_tomorrow())
     asyncio.run(live.forecast_tomorrow())  # тот же цикл в пределах TTL — из кэша
@@ -98,8 +98,8 @@ def test_new_cycle_busts_cache(monkeypatch):
         calls["n"] += 1
         return [_fp("NBM", TOMORROW, 81.0)]
 
-    monkeypatch.setattr(live.nbm, "fetch_forecast", nbm_fetch)
-    monkeypatch.setattr(live.mav, "fetch_forecast", lambda c: [])
+    monkeypatch.setitem(sources.SOURCES, "NBM", nbm_fetch)
+    monkeypatch.setitem(sources.SOURCES, "MAV", lambda d, c: [])
 
     asyncio.run(live.forecast_tomorrow())
     monkeypatch.setattr(live, "latest_cycle", lambda: (date(2026, 7, 15), "00"))
@@ -115,8 +115,8 @@ def test_total_failure_not_cached(monkeypatch):
         calls["n"] += 1
         raise RuntimeError("нет сети")
 
-    monkeypatch.setattr(live.nbm, "fetch_forecast", boom)
-    monkeypatch.setattr(live.mav, "fetch_forecast", boom)
+    monkeypatch.setitem(sources.SOURCES, "NBM", boom)
+    monkeypatch.setitem(sources.SOURCES, "MAV", boom)
 
     asyncio.run(live.forecast_tomorrow())
     asyncio.run(live.forecast_tomorrow())   # полный провал не кэшируется — пробуем снова

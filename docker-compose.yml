@@ -1,4 +1,4 @@
-# docker-compose.yml — описание запуска сервиса на VPS.
+# docker-compose.yml — альтернативный постоянный запуск сервиса на VPS.
 # Один сервис (собирается из Dockerfile), проброс .env, volume под файл SQLite,
 # чтобы данные (forecasts/actuals) переживали пересборку контейнера. restart: unless-stopped.
 

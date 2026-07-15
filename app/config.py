@@ -32,6 +32,7 @@ WFO = "LOX"                 # офис NWS (Los Angeles/Oxnard)
 CLI_OFFICE = "KLOX"         # issuingOffice для CLI-продуктов в api.weather.gov
 CLI_STATION_TITLE = "LOS ANGELES INTL AIRPORT"  # маркер нужного CLI среди станций офиса
 CLI_AWIPS_ID = "CLILAX"     # AWIPS-идентификатор нужного CLI-бюллетеня
+CLI_LOCATION = "LAX"        # locationId NWS Products API для CLILAX
 
 TZ = "America/Los_Angeles"  # климатические сутки станции считаются в этой зоне
 
@@ -68,9 +69,17 @@ MET_URL_TEMPLATE = os.getenv(
 )
 
 # CLI: список продуктов офиса и получение текста конкретного продукта.
+CLI_LIST_URL_TEMPLATE = os.getenv(
+    "CLI_LIST_URL_TEMPLATE",
+    "https://api.weather.gov/products?type=CLI&office={office}"
+    "&location={location}&limit={limit}",
+)
+# Старое переопределение сохраняется для обычного запроса свежих 25 продуктов.
 CLI_LIST_URL = os.getenv(
     "CLI_LIST_URL",
-    f"https://api.weather.gov/products?type=CLI&office={CLI_OFFICE}&limit=25",
+    CLI_LIST_URL_TEMPLATE.format(
+        office=CLI_OFFICE, location=CLI_LOCATION, limit=25
+    ),
 )
 CLI_PRODUCT_URL = os.getenv(
     "CLI_PRODUCT_URL", "https://api.weather.gov/products/{product_id}"
@@ -85,6 +94,22 @@ METAR_URL_TEMPLATE = os.getenv(
 # Доступные циклы моделей (UTC-часы выпуска).
 MODEL_CYCLES = ("00", "06", "12", "18")
 
+# --- Polymarket (данные рынка ставок на Tmax LA) -----------------------------
+# Ежедневное событие «Highest temperature in Los Angeles on <date>?» резолвится
+# по той же станции KLAX (Wunderground, целые °F), что и наши прогнозы/факты.
+# Gamma API — публичный read-only без ключа; slug события строится из даты.
+POLYMARKET_API_URL_TEMPLATE = os.getenv(
+    "POLYMARKET_API_URL_TEMPLATE",
+    "https://gamma-api.polymarket.com/events?slug={slug}",
+)
+POLYMARKET_SLUG_TEMPLATE = os.getenv(
+    "POLYMARKET_SLUG_TEMPLATE",
+    "highest-temperature-in-los-angeles-on-{month}-{day}-{year}",
+)
+POLYMARKET_EVENT_URL_TEMPLATE = os.getenv(
+    "POLYMARKET_EVENT_URL_TEMPLATE", "https://polymarket.com/event/{slug}"
+)
+
 # --- База данных -----------------------------------------------------------
 # Путь к файлу SQLite. По умолчанию — в корне проекта; в Docker монтируется на
 # volume. Хранит forecasts и actuals (см. app/db/schema.sql).
@@ -98,7 +123,7 @@ def _resolve_db_path(raw: str) -> str:
     return str(_PROJECT_ROOT / raw)
 
 
-DB_PATH = _resolve_db_path(os.getenv("DB_PATH", "la_weather.db"))
+DB_PATH = _resolve_db_path(os.getenv("DB_PATH", "weather.db"))
 
 # --- Расписание джобов (Фаза 2) --------------------------------------------
 # Время в зоне станции (America/Los_Angeles). Сбор прогнозов — после того как
@@ -110,6 +135,8 @@ FETCH_HOURS_LA = tuple(
 VERIFY_HOURS_LA = tuple(
     int(h) for h in os.getenv("VERIFY_HOURS_LA", "9,15").split(",")
 )
+FETCH_MINUTE = int(os.getenv("FETCH_MINUTE", "30"))
+VERIFY_MINUTE = int(os.getenv("VERIFY_MINUTE", "0"))
 # Бюллетени NBS/MAV появляются не сразу после часа цикла; при выборе «свежего»
 # доступного цикла отступаем на этот лаг (часы).
 FETCH_LAG_HOURS = float(os.getenv("FETCH_LAG_HOURS", "4"))

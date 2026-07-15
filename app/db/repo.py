@@ -82,7 +82,7 @@ def upsert_forecast(conn: sqlite3.Connection, fp: ForecastPoint) -> None:
 
 
 def upsert_forecasts(conn: sqlite3.Connection, points: list[ForecastPoint]) -> int:
-    """Записать пачку прогнозов и закоммитить; вернуть число записанных строк."""
+    """Выполнить upsert пачки, закоммитить и вернуть число обработанных точек."""
     for fp in points:
         upsert_forecast(conn, fp)
     conn.commit()
@@ -196,7 +196,12 @@ def list_actuals(
 
 
 def error_series(
-    conn: sqlite3.Connection, model: str, start: date, end: date
+    conn: sqlite3.Connection,
+    model: str,
+    start: date,
+    end: date,
+    *,
+    actuals: list[ActualTmax] | None = None,
 ) -> list[tuple[date, float, float]]:
     """Пары (дата, зачётный_прогноз_f, факт_f) за [start, end] для модели.
 
@@ -204,12 +209,36 @@ def error_series(
     цикл до local midnight). Заготовка для метрик (app/metrics.py) и команды
     /errors — сама агрегация чистая и живёт в metrics.
     """
-    out: list[tuple[date, float, float]] = []
-    for actual in list_actuals(conn, start, end):
-        fc = official_forecast(conn, actual.date, model)
-        if fc is not None:
-            out.append((actual.date, fc.tmax_f, actual.tmax_f))
-    return out
+    actuals = actuals if actuals is not None else list_actuals(conn, start, end)
+    if not actuals:
+        return []
+
+    # Все циклы модели получаем одним запросом. Порог local midnight остаётся в
+    # Python, поскольку он индивидуален для даты и должен корректно учитывать DST.
+    rows = conn.execute(
+        """
+        SELECT target_date, cycle, tmax_f
+        FROM forecasts
+        WHERE model = ? AND target_date BETWEEN ? AND ?
+        ORDER BY target_date, cycle DESC
+        """,
+        (model, _fmt_date(start), _fmt_date(end)),
+    ).fetchall()
+    cutoffs = {
+        actual.date: _fmt_cycle(timeutil.local_day_bounds(actual.date)[0])
+        for actual in actuals
+    }
+    official: dict[date, float] = {}
+    for row in rows:
+        target = date.fromisoformat(row["target_date"])
+        if target not in official and row["cycle"] < cutoffs.get(target, ""):
+            official[target] = row["tmax_f"]
+
+    return [
+        (actual.date, official[actual.date], actual.tmax_f)
+        for actual in actuals
+        if actual.date in official
+    ]
 
 
 def _row_to_forecast(row: sqlite3.Row) -> ForecastPoint:

@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Iterable
 
 from app import config
 from app.sources import (
     ForecastPoint,
     ParseError,
-    http_iter_lines,
+    http_stream_extract,
     parse_fixed_bulletin,
 )
 
@@ -21,7 +22,7 @@ MODEL = "NBM"
 _STATION_PREFIX = f" {config.STATION} "  # блок станции начинается с ' KLAX '
 
 
-def extract_station_block(lines) -> str:
+def extract_station_block(lines: Iterable[str]) -> str:
     """Вырезать блок нужной станции из потока строк bulk-файла NBS."""
     block: list[str] = []
     collecting = False
@@ -42,7 +43,7 @@ def fetch_nbs_raw(run_date: date, cycle: str) -> str:
     url = config.NBS_URL_TEMPLATE.format(
         date=run_date.strftime("%Y%m%d"), cycle=cycle
     )
-    return extract_station_block(http_iter_lines(url))
+    return http_stream_extract(url, extract_station_block)
 
 
 def parse_nbs(text: str) -> list[ForecastPoint]:

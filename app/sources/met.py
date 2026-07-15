@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from app import config
 from app.sources import (
     ForecastPoint,
-    http_iter_lines,
+    http_stream_extract,
     parse_fixed_bulletin,
 )
 from app.sources.nbm import extract_station_block
@@ -33,7 +35,7 @@ def mos_cycle(cycle: str) -> str:
 def fetch_met_raw(cycle: str) -> str:
     """Скачать и вернуть сырой текстовый блок KLAX из коллективного MET за цикл."""
     url = config.MET_URL_TEMPLATE.format(cycle=mos_cycle(cycle))
-    return extract_station_block(http_iter_lines(url))
+    return http_stream_extract(url, extract_station_block)
 
 
 def parse_met(text: str) -> list[ForecastPoint]:
@@ -45,6 +47,6 @@ def parse_met(text: str) -> list[ForecastPoint]:
                                 maxmin_label="X/N")
 
 
-def fetch_forecast(cycle: str) -> list[ForecastPoint]:
+def fetch_forecast(_run_date: date, cycle: str) -> list[ForecastPoint]:
     """Полный путь: скачать блок KLAX и разобрать в прогнозы."""
     return parse_met(fetch_met_raw(cycle))

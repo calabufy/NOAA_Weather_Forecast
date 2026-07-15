@@ -9,7 +9,7 @@ name: bot-poll
 #
 # Ничего не пишет в git: /forecast тянет прогноз лениво напрямую у источников
 # (app/bot/live.py, в БД не сохраняет), /errors только читает БД, которую
-# наполняют fetch/verify из weather-jobs.yml.
+# наполняют fetch из weather-jobs.yml и verify из verify-actuals.yml.
 on:
   schedule:
     - cron: '*/5 * * * *'

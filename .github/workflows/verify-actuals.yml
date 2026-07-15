@@ -1,10 +1,10 @@
-name: fetch-forecasts
+name: verify-actuals
 
-# Сбор прогнозов отдельным workflow: cron задан в одном месте, поэтому его
-# изменение не требует синхронной правки строкового условия job.if.
+# Верификация отделена от fetch: у каждого задания собственный cron без
+# дублирующего сравнения github.event.schedule.
 on:
   schedule:
-    - cron: '30 11,17,23,5 * * *'  # ≈ LA 03:30/09:30/15:30/21:30 (PST)
+    - cron: '0 17,23 * * *'  # ≈ LA 09:00/15:00 (PST)
   workflow_dispatch: {}
 
 permissions:
@@ -18,7 +18,7 @@ env:
   DB_PATH: data/la_weather.db
 
 jobs:
-  fetch-forecasts:
+  verify-actuals:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,13 +29,13 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: pip install .
       - run: mkdir -p data
-      - name: Fetch forecasts
-        run: python -m scripts.run_job fetch
+      - name: Verify actuals
+        run: python -m scripts.run_job verify
       - name: Commit updated DB
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/la_weather.db
-          git diff --staged --quiet || git commit -m "chore: fetch forecasts [skip ci]"
+          git diff --staged --quiet || git commit -m "chore: verify actuals [skip ci]"
           git pull --rebase
           git push

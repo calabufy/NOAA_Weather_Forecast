@@ -5,13 +5,15 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import TelegramObject
 
 log = logging.getLogger(__name__)
+_TELEGRAM_ALERT_TEXT_LIMIT = 3500
 
 
 class AllowlistMiddleware(BaseMiddleware):
@@ -79,7 +81,8 @@ class TelegramAlertHandler(logging.Handler):
         except Exception:  # noqa: BLE001 — форматирование лога не должно падать
             return
         # Телеграм-лимит длины сообщения — обрезаем с запасом.
-        text = f"⚠️ Ошибка пайплайна:\n<pre>{_escape(text[:3500])}</pre>"
+        escaped = html.escape(text[:_TELEGRAM_ALERT_TEXT_LIMIT], quote=False)
+        text = f"⚠️ Ошибка пайплайна:\n<pre>{escaped}</pre>"
         for chat_id in self._chat_ids:
             asyncio.run_coroutine_threadsafe(
                 self._safe_send(chat_id, text), self._loop
@@ -90,11 +93,6 @@ class TelegramAlertHandler(logging.Handler):
             await self._bot.send_message(chat_id, text)
         except Exception:  # noqa: BLE001 — best-effort, сбой алерта не критичен
             log.warning("не удалось отправить алерт в chat_id=%s", chat_id)
-
-
-def _escape(text: str) -> str:
-    """Минимальный HTML-эскейп для вставки в <pre> (parse_mode=HTML)."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def install_alert_handler(

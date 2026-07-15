@@ -8,18 +8,26 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Iterator
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app import config
-from app import timeutil
+from app import config, timeutil
 
 UTC = timezone.utc
+log = logging.getLogger(__name__)
+
+_RETRY = retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+)
+_AFTERNOON_START_HOUR = 12
 
 
 # --- Доменные модели -------------------------------------------------------
@@ -28,7 +36,7 @@ UTC = timezone.utc
 class ForecastPoint:
     """Прогноз максимальной температуры на конкретные локальные сутки LA."""
     target_date: date       # климатическая дата LA, к которой относится Tmax
-    model: str              # 'NBM' | 'MAV'
+    model: str              # 'NBM' | 'MAV' | 'MET'
     cycle: datetime         # момент выпуска цикла модели (aware-UTC)
     tmax_f: float           # прогноз Tmax, °F
 
@@ -71,29 +79,36 @@ def _headers() -> dict[str, str]:
     return {"User-Agent": config.HTTP_USER_AGENT}
 
 
-@retry(reraise=True, stop=stop_after_attempt(4),
-       wait=wait_exponential(multiplier=1, min=2, max=30))
-def http_get_text(url: str) -> str:
-    """GET с ретраями, вернуть тело как текст."""
-    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=_headers(),
-                      follow_redirects=True) as client:
-        r = client.get(url)
-        r.raise_for_status()
-        return r.text
+def _client() -> httpx.Client:
+    """HTTP-клиент с едиными настройками всех источников NOAA."""
+    return httpx.Client(
+        timeout=config.HTTP_TIMEOUT,
+        headers=_headers(),
+        follow_redirects=True,
+    )
 
 
-@retry(reraise=True, stop=stop_after_attempt(4),
-       wait=wait_exponential(multiplier=1, min=2, max=30))
+@_RETRY
 def http_get_json(url: str) -> Any:
     """GET с ретраями, вернуть распарсенный JSON."""
-    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=_headers(),
-                      follow_redirects=True) as client:
+    with _client() as client:
         r = client.get(url)
         r.raise_for_status()
         return r.json()
 
 
-# --- Парсер фиксированных текстовых бюллетеней (общий для NBS и MAV) --------
+@_RETRY
+def http_stream_extract(
+    url: str, extractor: Callable[[Iterator[str]], str]
+) -> str:
+    """Скачать URL стримингом и обработать всю итерацию внутри retry."""
+    with _client() as client:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            return extractor(response.iter_lines())
+
+
+# --- Парсер фиксированных текстовых бюллетеней (NBS, MAV и MET) -------------
 # Структура MOS/NBM-бюллетеня одинакова: строка-шапка со станцией/моделью/циклом,
 # строка часов (UTC/HR), строка max/min (TXN/N-X), строка почасовой TMP.
 # Значения выровнены по правому краю в колонках, совпадающих с колонками часов,
@@ -112,8 +127,8 @@ def _find_row(lines: list[str], label: str) -> str | None:
     return None
 
 
-def _column_bounds(hours_row: str) -> tuple[int, list[tuple[int, int]], list[int]]:
-    """По строке часов вернуть (label_end, спаны колонок, часы).
+def _column_bounds(hours_row: str) -> tuple[list[tuple[int, int]], list[int]]:
+    """По строке часов вернуть (спаны колонок, часы).
 
     Спан колонки — (left, right) в символах; значение в любой строке данных
     берётся как hours_row-совместимый слайс и обрезается по пробелам.
@@ -126,7 +141,7 @@ def _column_bounds(hours_row: str) -> tuple[int, list[tuple[int, int]], list[int
     rights = [m.end() for m in hour_toks]
     lefts = [label_end] + rights[:-1]
     hours = [int(m.group()) for m in hour_toks]
-    return label_end, list(zip(lefts, rights)), hours
+    return list(zip(lefts, rights)), hours
 
 
 def _slice(row: str, span: tuple[int, int]) -> str:
@@ -176,7 +191,7 @@ def parse_fixed_bulletin(text: str, model: str, hours_label: str,
     if hours_row is None or tmp_row is None:
         raise ParseError("отсутствует строка часов или TMP")
 
-    _label_end, spans, hours = _column_bounds(hours_row)
+    spans, hours = _column_bounds(hours_row)
     col_dt = _column_datetimes(cycle_dt, hours)
 
     # Дневные максимумы из строки max/min.
@@ -187,7 +202,7 @@ def parse_fixed_bulletin(text: str, model: str, hours_label: str,
             if not raw or not raw.lstrip("-").isdigit():
                 continue
             local = dt.astimezone(timeutil.LA)
-            if local.hour >= 12:  # послеполуденный максимум
+            if local.hour >= _AFTERNOON_START_HOUR:  # послеполуденный максимум
                 d = local.date()
                 val = float(int(raw))
                 tmax_by_date[d] = max(tmax_by_date.get(d, val), val)
@@ -209,16 +224,27 @@ def parse_fixed_bulletin(text: str, model: str, hours_label: str,
     ]
 
 
-@retry(reraise=True, stop=stop_after_attempt(4),
-       wait=wait_exponential(multiplier=1, min=2, max=30))
-def http_iter_lines(url: str):
-    """Стрим тела построчно (для больших bulk-файлов, напр. NBS ~28 МБ).
+# Импорты намеренно в конце: модули моделей используют объявленные выше типы и
+# парсеры. Так единый реестр не создаёт циклической инициализации пакета.
+from app.sources import mav, met, nbm  # noqa: E402
 
-    Возвращает генератор строк без разделителей; соединение закрывается по
-    исчерпании итератора или досрочном break у вызывающего.
-    """
-    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=_headers(),
-                      follow_redirects=True) as client:
-        with client.stream("GET", url) as r:
-            r.raise_for_status()
-            yield from r.iter_lines()
+SourceFetcher = Callable[[date, str], list[ForecastPoint]]
+SOURCES: dict[str, SourceFetcher] = {
+    nbm.MODEL: nbm.fetch_forecast,
+    mav.MODEL: mav.fetch_forecast,
+    met.MODEL: met.fetch_forecast,
+}
+
+
+def fetch_all_isolated(
+    run_date: date, cycle: str
+) -> dict[str, list[ForecastPoint]]:
+    """Получить все модели, изолируя сбой каждой отдельной модели."""
+    points: dict[str, list[ForecastPoint]] = {}
+    for model, fetch in SOURCES.items():
+        try:
+            points[model] = fetch(run_date, cycle)
+        except Exception:  # noqa: BLE001 — одна модель не должна ронять остальные
+            log.exception("сбор прогноза %s не удался", model)
+            points[model] = []
+    return points

@@ -13,9 +13,10 @@ import html
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from app import config
+from app import config, timeutil
 from app.metrics import HIT_THRESHOLDS_F, WINDOWS, WindowStats
 from app.sources import ForecastPoint
+from app.sources.polymarket import TempMarket
 from app.timeutil import LA
 
 # Человекочитаемые подписи окон (порядок совпадает с metrics.WINDOWS).
@@ -23,6 +24,10 @@ WINDOW_LABELS = {"7d": "7д", "30d": "30д", "season": "сез", "year": "год
 
 # Зона для перевода расписания джобов (заданного в локальном времени LA) в МСК.
 MSK = ZoneInfo("Europe/Moscow")
+
+# Диапазоны Polymarket с вероятностью ниже порога не показываем (длинные хвосты
+# по полдоллара оборота), кроме тех, куда попал прогноз какой-либо из моделей.
+MARKET_MIN_PROB_SHOWN = 0.01
 
 
 # --- Единицы и мелкие подписи ----------------------------------------------
@@ -68,6 +73,67 @@ def format_forecast(
                 f"{model}: {temp_label(fp.tmax_f)}, цикл {cycle_label(fp.cycle)}"
             )
     return "\n".join(lines)
+
+
+# --- Рынок Polymarket (вторая часть ответа /forecast) ------------------------
+
+def _market_rows(
+    market: TempMarket, points: dict[str, ForecastPoint | None]
+) -> list[str]:
+    """Строки таблицы диапазонов: подпись, вероятность, метки моделей.
+
+    Показываются диапазоны с вероятностью >= MARKET_MIN_PROB_SHOWN, а также
+    любые диапазоны, куда попал прогноз модели (даже «хвостовые»), — стрелка
+    с именами моделей отмечает, на что фактически «ставит» каждый прогноз.
+    """
+    marks: dict[str, list[str]] = {}
+    for model, fp in points.items():
+        if fp is None:
+            continue
+        bucket = market.bucket_for(fp.tmax_f)
+        if bucket is not None:
+            marks.setdefault(bucket.label, []).append(model)
+
+    shown = [
+        b for b in market.buckets
+        if b.prob >= MARKET_MIN_PROB_SHOWN or b.label in marks
+    ]
+    width = max((len(b.label) for b in shown), default=0)
+    rows = []
+    for b in shown:
+        pct = round(b.prob * 100)
+        prob_cell = f"{pct}%" if pct >= 1 else "<1%"
+        row = f"{b.label.ljust(width)}  {prob_cell.rjust(4)}"
+        if b.label in marks:
+            row += "  ← " + ", ".join(marks[b.label])
+        rows.append(row)
+    return rows
+
+
+def format_market(
+    market: TempMarket | None, points: dict[str, ForecastPoint | None]
+) -> str:
+    """Блок Polymarket для /forecast: вероятности диапазонов и ссылка на ставку.
+
+    market=None — рынок недоступен (ещё не создан или сбой запроса): честная
+    строка вместо блока. points — те же прогнозы, что показаны выше по тексту;
+    диапазон с прогнозом модели помечается стрелкой с её именем.
+    """
+    if market is None:
+        return (
+            "Polymarket: рынок на эти сутки недоступен "
+            "(ещё не создан или сбой запроса)."
+        )
+    head = (
+        f"Polymarket — ставки на Tmax "
+        f"({date_label(market.target_date)}, {config.STATION}):"
+    )
+    table = "\n".join(_market_rows(market, points))
+    foot = (
+        f"Объём ${market.volume_usd:,.0f} · "
+        f'<a href="{html.escape(market.url, quote=True)}">открыть рынок</a>'
+    )
+    return f"<b>{html.escape(head)}</b>\n<pre>{html.escape(table)}</pre>\n{foot}"
 
 
 # --- /errors ---------------------------------------------------------------
@@ -166,9 +232,9 @@ def format_help(ref: date | None = None) -> str:
     ref — дата, на которую считается перевод расписания в МСК (по умолчанию
     сегодня по LA): смещение LA↔МСК плавает с переходом на летнее время в США.
     """
-    ref = ref or date.today()
-    fetch = _schedule_line(config.FETCH_HOURS_LA, 30, ref)
-    verify = _schedule_line(config.VERIFY_HOURS_LA, 0, ref)
+    ref = ref or timeutil.la_today()
+    fetch = _schedule_line(config.FETCH_HOURS_LA, config.FETCH_MINUTE, ref)
+    verify = _schedule_line(config.VERIFY_HOURS_LA, config.VERIFY_MINUTE, ref)
 
     return (
         f"<b>Прогноз Tmax по станции {config.STATION} (Лос-Анджелес)</b>\n"
@@ -187,7 +253,10 @@ def format_help(ref: date | None = None) -> str:
 
         "<b>Команды</b>\n"
         "• <b>/forecast</b> — прогноз Tmax на завтра по NBM, MAV и MET (°F и °C, "
-        "с указанием цикла модели).\n"
+        "с указанием цикла модели), плюс рынок Polymarket на те же сутки: "
+        "вменённые вероятности диапазонов Tmax (цены Yes-долей), стрелка — "
+        "диапазон, куда попал прогноз модели, и ссылка на ставку. Рынок "
+        "резолвится по той же станции KLAX (Wunderground, целые °F).\n"
         "• <b>/errors</b> — метрики качества прогнозов по окнам (см. ниже).\n"
         "• <b>/help</b> — эта справка.\n"
         "• <b>/start</b> — краткая справка.\n\n"
@@ -209,8 +278,8 @@ def format_help(ref: date | None = None) -> str:
         "всех окон — вчера (за сегодня факта ещё нет).\n\n"
 
         "<b>Циклы (расписание в МСК)</b>\n"
-        f"• <b>Сбор прогнозов</b>: {fetch}. Берёт свежий доступный цикл NBM и "
-        "MAV (с лагом на публикацию бюллетеня) и пишет прогнозы в БД.\n"
+        f"• <b>Сбор прогнозов</b>: {fetch}. Берёт свежий доступный цикл NBM, "
+        "MAV и MET (с лагом на публикацию бюллетеня) и пишет прогнозы в БД.\n"
         f"• <b>Сбор факта (верификация)</b>: {verify}. Забирает Tmax за вчера "
         "из CLI (фолбэк — METAR) для расчёта ошибок.\n"
         "Время LA→МСК: летом (амер. DST) +10 ч, зимой +11 ч — расписание выше "

@@ -8,13 +8,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import Iterator
 from datetime import date
 
 from app import config
 from app.sources import ActualTmax, ParseError, http_get_json
 
 SOURCE = "CLI"
+log = logging.getLogger(__name__)
+_PRODUCT_HEADER_LENGTH = 400
 
 _MONTHS = {
     "JANUARY": 1, "FEBRUARY": 2, "MARCH": 3, "APRIL": 4, "MAY": 5, "JUNE": 6,
@@ -32,22 +36,42 @@ _MAXIMUM_RE = re.compile(r"^\s*MAXIMUM\s+(-?\d+)", re.MULTILINE)
 
 def _is_lax(product_text: str) -> bool:
     """Это ли CLI именно для KLAX (по AWIPS-id / заголовку станции)."""
-    head = product_text[:400].upper()
+    head = product_text[:_PRODUCT_HEADER_LENGTH].upper()
     return config.CLI_AWIPS_ID in head or config.CLI_STATION_TITLE in head
+
+
+def iter_lax_products(limit: int = 25) -> Iterator[str]:
+    """Перебрать тексты CLILAX от новых к старым, пропуская чужие станции."""
+    url = (
+        config.CLI_LIST_URL
+        if limit == 25
+        else config.CLI_LIST_URL_TEMPLATE.format(
+            office=config.CLI_OFFICE,
+            location=config.CLI_LOCATION,
+            limit=limit,
+        )
+    )
+    listing = http_get_json(url)
+    products = listing.get("@graph", [])
+    for item in products:  # список отсортирован от свежих к старым
+        product_id = item["@id"].rsplit("/", 1)[-1]
+        try:
+            obj = http_get_json(
+                config.CLI_PRODUCT_URL.format(product_id=product_id)
+            )
+        except Exception:  # noqa: BLE001 — один продукт не прерывает весь архив
+            log.warning("не удалось получить CLI-продукт %s", product_id)
+            continue
+        text = obj.get("productText", "")
+        if _is_lax(text):
+            yield text
 
 
 def fetch_latest_cli() -> str:
     """Вернуть productText свежего CLILAX (обходя другие станции офиса)."""
-    listing = http_get_json(config.CLI_LIST_URL)
-    products = listing.get("@graph", [])
-    for item in products:  # список отсортирован от свежих к старым
-        product_id = item["@id"].rsplit("/", 1)[-1]
-        obj = http_get_json(
-            config.CLI_PRODUCT_URL.format(product_id=product_id)
-        )
-        text = obj.get("productText", "")
-        if _is_lax(text):
-            return text
+    text = next(iter_lax_products(), None)
+    if text is not None:
+        return text
     raise ParseError("свежий CLILAX не найден среди продуктов офиса")
 
 

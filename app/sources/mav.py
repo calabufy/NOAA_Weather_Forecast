@@ -12,8 +12,7 @@ from datetime import date
 from app import config
 from app.sources import (
     ForecastPoint,
-    ParseError,
-    http_iter_lines,
+    http_stream_extract,
     parse_fixed_bulletin,
 )
 from app.sources.nbm import extract_station_block
@@ -24,7 +23,7 @@ MODEL = "MAV"
 def fetch_mav_raw(cycle: str) -> str:
     """Скачать и вернуть сырой текстовый блок KLAX из коллективного MAV за цикл."""
     url = config.MAV_URL_TEMPLATE.format(cycle=cycle)
-    return extract_station_block(http_iter_lines(url))
+    return http_stream_extract(url, extract_station_block)
 
 
 def parse_mav(text: str) -> list[ForecastPoint]:
@@ -36,6 +35,6 @@ def parse_mav(text: str) -> list[ForecastPoint]:
                                 maxmin_label="N/X")
 
 
-def fetch_forecast(cycle: str) -> list[ForecastPoint]:
+def fetch_forecast(_run_date: date, cycle: str) -> list[ForecastPoint]:
     """Полный путь: скачать блок KLAX и разобрать в прогнозы."""
     return parse_mav(fetch_mav_raw(cycle))

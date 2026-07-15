@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 from datetime import date, timedelta
 
-from app import config, timeutil
+from app import timeutil
 from app.db import repo
-from app.sources import ActualTmax, ParseError, cli_report, http_get_json, nws
+from app.sources import ActualTmax, ParseError, cli_report, nws
 
 log = logging.getLogger("backfill")
 
@@ -43,33 +44,19 @@ def cli_archive(cli_limit: int) -> dict[date, ActualTmax]:
     Листинг продуктов отсортирован от свежих к старым; для одной даты берём
     первый (самый свежий — учитывает возможные corrected-выпуски CLI).
     """
-    listing_url = (
-        f"https://api.weather.gov/products?type=CLI"
-        f"&office={config.CLI_OFFICE}&limit={cli_limit}"
-    )
     by_date: dict[date, ActualTmax] = {}
-    listing = http_get_json(listing_url)
-    for item in listing.get("@graph", []):
-        product_id = item["@id"].rsplit("/", 1)[-1]
-        try:
-            obj = http_get_json(config.CLI_PRODUCT_URL.format(product_id=product_id))
-        except Exception:  # noqa: BLE001 — один сбойный продукт не рушит бэкфилл
-            log.warning("не удалось получить CLI-продукт %s", product_id)
-            continue
-        text = obj.get("productText", "")
-        if not cli_report._is_lax(text):  # чужая станция офиса — пропускаем
-            continue
+    for text in cli_report.iter_lax_products(cli_limit):
         try:
             actual = cli_report.parse_cli_tmax(text)
         except ParseError as e:
-            log.warning("CLI-продукт %s не распознан: %s", product_id, e)
+            log.warning("CLI-продукт не распознан: %s", e)
             continue
         by_date.setdefault(actual.date, actual)
     return by_date
 
 
 def backfill(
-    conn,
+    conn: sqlite3.Connection,
     d0: date,
     d1: date,
     source: str,

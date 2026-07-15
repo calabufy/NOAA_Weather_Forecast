@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from app import config
+from app import config, timeutil
 from app.sources import (
     ActualTmax,
     Observation,
@@ -18,7 +18,6 @@ from app.sources import (
     c_to_f,
     http_get_json,
 )
-from app import timeutil
 
 SOURCE = "METAR"
 
