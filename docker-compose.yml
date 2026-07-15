@@ -1,3 +1,26 @@
 # docker-compose.yml — описание запуска сервиса на VPS.
 # Один сервис (собирается из Dockerfile), проброс .env, volume под файл SQLite,
 # чтобы данные (forecasts/actuals) переживали пересборку контейнера. restart: unless-stopped.
+
+services:
+  bot:
+    build: .
+    image: la-weather-forecast
+    restart: unless-stopped
+    # BOT_TOKEN, ALLOWED_CHAT_IDS, HTTP_CONTACT и пр. — из .env (см. .env.example).
+    env_file: .env
+    # DB_PATH принудительно на volume: значение из .env (weather.db в корне) для
+    # контейнера неверно — файл БД должен лежать на /data, а не в слое образа.
+    environment:
+      DB_PATH: /data/weather.db
+    volumes:
+      - weather-db:/data
+    # Логи джобов/бота через стандартный драйвер; ограничиваем рост на VPS.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  weather-db:

@@ -1,0 +1,16 @@
+# .dockerignore — что не попадает в build-контекст образа.
+# Секреты, файлы БД, тесты/фикстуры, кэши и локальное окружение: образу нужен
+# только код приложения и манифест зависимостей.
+.env
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.git/
+.gitignore
+.idea/
+tests/
+Dockerfile
+docker-compose.yml
