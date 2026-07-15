@@ -60,6 +60,13 @@ MAV_URL_TEMPLATE = os.getenv(
     "https://www.weather.gov/source/mdl/MOS/GFSMAV.t{cycle}z",
 )
 
+# NAM MOS / MET: коллективный текстовый файл MDL по циклу (все станции).
+# Независимая от GFS модель (NAM); формат MOS тот же, что у MAV. {cycle}=00|06|12|18
+MET_URL_TEMPLATE = os.getenv(
+    "MET_URL_TEMPLATE",
+    "https://www.weather.gov/source/mdl/MOS/NAMMET.t{cycle}z",
+)
+
 # CLI: список продуктов офиса и получение текста конкретного продукта.
 CLI_LIST_URL = os.getenv(
     "CLI_LIST_URL",
@@ -120,7 +127,7 @@ ALLOWED_CHAT_IDS = frozenset(
 )
 
 # Модели, показываемые в боте (порядок = порядок вывода; NBM — основной).
-BOT_MODELS = ("NBM", "MAV")
+BOT_MODELS = ("NBM", "MAV", "MET")
 
 # Кэш ленивого забора /forecast (app/bot/live.py): сколько секунд переиспользовать
 # уже скачанный прогноз, чтобы не тянуть бюллетени (NBS ~28 МБ) на каждый запрос.

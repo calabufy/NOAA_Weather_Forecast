@@ -26,7 +26,7 @@ router = Router()
 # Подсказки команд в меню Telegram (кнопка «/» слева от поля ввода).
 # Порядок = порядок отображения; регистрируются на старте в main.py.
 BOT_COMMANDS = [
-    BotCommand(command="forecast", description="Прогноз Tmax на завтра (NBM, MAV)"),
+    BotCommand(command="forecast", description="Прогноз Tmax на завтра (NBM, MAV, MET)"),
     BotCommand(command="errors", description="Метрики ошибок по окнам"),
     BotCommand(command="help", description="Справка: модели, метрики, циклы"),
     BotCommand(command="start", description="Краткая справка"),
@@ -39,7 +39,7 @@ async def setup_commands(bot: Bot) -> None:
 
 _START = (
     "Прогноз Tmax по станции KLAX (Лос-Анджелес) и статистика ошибок моделей.\n\n"
-    "<b>/forecast</b> — прогноз максимума на завтра (NBM и MAV).\n"
+    "<b>/forecast</b> — прогноз максимума на завтра (NBM, MAV, MET).\n"
     "<b>/errors</b> — метрики качества по окнам 7д/30д/сезон/год.\n"
     "<b>/help</b> — подробная справка: модели, метрики, расписание циклов."
 )

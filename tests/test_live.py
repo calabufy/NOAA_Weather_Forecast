@@ -25,6 +25,9 @@ def _setup(monkeypatch, *, run_date=date(2026, 7, 14), cycle="18",
     live._cache.clear()
     monkeypatch.setattr(live, "latest_cycle", lambda: (run_date, cycle))
     monkeypatch.setattr(live.timeutil, "la_tomorrow", lambda: tomorrow)
+    # MET входит в BOT_MODELS -> _fetch_all его дёрнет; по умолчанию глушим в сеть,
+    # тесты, которым MET важен, переопределяют этот патч.
+    monkeypatch.setattr(live.met, "fetch_forecast", lambda c: [])
 
 
 def test_picks_tomorrow_from_fresh_cycle(monkeypatch):

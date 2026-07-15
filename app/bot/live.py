@@ -18,7 +18,7 @@ from datetime import date
 
 from app import config, timeutil
 from app.jobs.fetch_forecasts import latest_cycle
-from app.sources import ForecastPoint, mav, nbm
+from app.sources import ForecastPoint, mav, met, nbm
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ def _fetch_all(run_date: date, cycle: str) -> dict[str, list[ForecastPoint]]:
     sources = (
         (nbm.MODEL, lambda: nbm.fetch_forecast(run_date, cycle)),
         (mav.MODEL, lambda: mav.fetch_forecast(cycle)),
+        (met.MODEL, lambda: met.fetch_forecast(cycle)),
     )
     out: dict[str, list[ForecastPoint]] = {}
     for model, fetch in sources:

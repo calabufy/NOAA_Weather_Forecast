@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.sources import ParseError, cli_report, mav, nbm, nws
+from app.sources import ParseError, cli_report, mav, met, nbm, nws
 
 FIXTURES = Path(__file__).parent / "fixtures"
 UTC = timezone.utc
@@ -44,6 +44,21 @@ def test_parse_mav_extracts_daily_maxes():
     # Неполные краевые сутки (утро выпуска, последнее утро) отброшены.
     assert date(2026, 7, 10) not in by_date
     assert date(2026, 7, 13) not in by_date
+
+
+def test_parse_met_extracts_daily_maxes():
+    points = met.parse_met(_read("met_klax.txt"))
+    by_date = {p.target_date: p.tmax_f for p in points}
+    # Цикл 00Z 14 июля, NAM MOS: дневные максимумы X/N = 78 на 15 июля, 77 на 16-е.
+    assert by_date[date(2026, 7, 15)] == 78.0
+    assert by_date[date(2026, 7, 16)] == 77.0
+    assert all(p.model == "MET" for p in points)
+    assert all(p.cycle == datetime(2026, 7, 14, 0, tzinfo=UTC) for p in points)
+
+
+def test_met_cycle_maps_to_available_00_12():
+    # NAM MOS есть только на 00Z/12Z: 06->00, 18->12 (иначе 404).
+    assert [met.mos_cycle(c) for c in ("00", "06", "12", "18")] == ["00", "00", "12", "12"]
 
 
 def test_bulletin_parser_raises_on_garbage():

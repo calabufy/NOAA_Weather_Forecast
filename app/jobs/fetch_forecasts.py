@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from app import config
 from app.db import repo
-from app.sources import mav, nbm
+from app.sources import mav, met, nbm
 
 UTC = timezone.utc
 log = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def _fetch_model(conn, model: str, points_fn) -> int:
 
 
 def run(conn, run_date: date | None = None, cycle: str | None = None) -> dict[str, int]:
-    """Собрать NBM и MAV за (run_date, cycle) и записать в БД.
+    """Собрать NBM, MAV и MET за (run_date, cycle) и записать в БД.
 
     run_date/cycle=None -> берётся свежий доступный цикл (latest_cycle).
     Возвращает {model: число записанных строк}.
@@ -64,4 +64,6 @@ def run(conn, run_date: date | None = None, cycle: str | None = None) -> dict[st
                                 lambda: nbm.fetch_forecast(run_date, cycle)),
         mav.MODEL: _fetch_model(conn, mav.MODEL,
                                 lambda: mav.fetch_forecast(cycle)),
+        met.MODEL: _fetch_model(conn, met.MODEL,
+                                lambda: met.fetch_forecast(cycle)),
     }
