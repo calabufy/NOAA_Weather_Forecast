@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: la-weather-forecast
+Version: 0.1.0
+Summary: Прогноз Tmax на станции KLAX (NOAA) с Telegram-ботом и статистикой ошибок
+Requires-Python: >=3.10
+Requires-Dist: httpx>=0.27
+Requires-Dist: tenacity>=8.2
+Requires-Dist: aiogram>=3.4
+Requires-Dist: apscheduler>=3.10
+Requires-Dist: python-dotenv>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

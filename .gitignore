@@ -1,9 +1,15 @@
 # .gitignore — что не попадает в репозиторий.
 # Секреты (.env), файлы БД (*.db), кэши Python и артефакты инструментов.
+#
+# Исключение: data/la_weather.db — это БД, которую коммитят воркфлоу
+# .github/workflows/weather-jobs.yml (fetch/verify), она же читается ботом в
+# .github/workflows/bot-poll.yml. GitHub Actions не хранит состояние между
+# независимыми запусками иначе, поэтому БД целенаправленно версионируется.
 
 .env
 *.db
 *.db-journal
+!data/la_weather.db
 __pycache__/
 *.pyc
 .pytest_cache/

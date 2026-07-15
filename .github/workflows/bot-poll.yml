@@ -1,0 +1,45 @@
+name: bot-poll
+
+# Сам Telegram-бот (/forecast, /errors, /help), запускаемый короткими сессиями
+# long polling вместо постоянно работающего процесса — GitHub Actions не умеет
+# держать процесс вечно. Раз в 5 минут (минимальный интервал cron у Actions)
+# поднимаем бота на несколько минут, он разгребает накопившиеся апдейты и
+# останавливается сам (BOT_POLL_SECONDS, см. app/main.py). Из-за этого ответ
+# бота приходит с задержкой порядка нескольких минут, а не мгновенно.
+#
+# Ничего не пишет в git: /forecast тянет прогноз лениво напрямую у источников
+# (app/bot/live.py, в БД не сохраняет), /errors только читает БД, которую
+# наполняют fetch/verify из weather-jobs.yml.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# cancel-in-progress безопасен: воркфлоу ничего не коммитит, отменить зависшую
+# предыдущую сессию в пользу свежей — не потеря данных.
+concurrency:
+  group: bot-poll
+  cancel-in-progress: true
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install .
+      - run: mkdir -p data  # на случай самого первого запуска, пока weather-jobs.yml ещё не закоммитил БД
+      - name: Poll Telegram for updates
+        run: python -m app.main
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ALLOWED_CHAT_IDS: ${{ secrets.ALLOWED_CHAT_IDS }}
+          DB_PATH: data/la_weather.db
+          BOT_POLL_SECONDS: "240"

@@ -1,0 +1,81 @@
+name: weather-jobs
+
+# Фоновые джобы сбора данных (Forecast Fetcher / Verification Job), вынесенные
+# из внутреннего APScheduler сервиса на GitHub Actions cron — сервис теперь
+# работает короткими сессиями (см. bot-poll.yml) и не держит собственный
+# планировщик. Джобы пишут в data/la_weather.db и коммитят изменения в git —
+# единственный способ пережить состояние между независимыми запусками Actions.
+#
+# Время cron — UTC, приближение к LA-местному времени из config.py
+# (FETCH_HOURS_LA/VERIFY_HOURS_LA) по зимнему смещению PST (UTC-8). Летом
+# (PDT, UTC-7) джобы будут срабатывать на час раньше по местному времени —
+# сознательно не компенсируем: не критично для статистики ошибок, усложнение
+# двойным cron-расписанием того не стоит.
+on:
+  schedule:
+    - cron: '30 11,17,23,5 * * *'  # fetch: ≈ LA 03:30/09:30/15:30/21:30 (PST)
+    - cron: '0 17,23 * * *'        # verify: ≈ LA 09:00/15:00 (PST)
+  workflow_dispatch: {}            # ручной запуск для теста
+
+permissions:
+  contents: write
+
+# Сериализация: fetch и verify пишут в один и тот же файл БД и коммитят —
+# без этого параллельные запуски могли бы конфликтовать при git push.
+concurrency:
+  group: weather-db-write
+  cancel-in-progress: false
+
+env:
+  DB_PATH: data/la_weather.db
+
+jobs:
+  fetch-forecasts:
+    if: >
+      github.event.schedule == '30 11,17,23,5 * * *' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install .
+      - run: mkdir -p data
+      - name: Fetch forecasts
+        run: python -m scripts.run_job fetch
+      - name: Commit updated DB
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/la_weather.db
+          git diff --staged --quiet || git commit -m "chore: fetch forecasts [skip ci]"
+          git pull --rebase
+          git push
+
+  verify-actuals:
+    if: >
+      github.event.schedule == '0 17,23 * * *' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install .
+      - run: mkdir -p data
+      - name: Verify actuals
+        run: python -m scripts.run_job verify
+      - name: Commit updated DB
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/la_weather.db
+          git diff --staged --quiet || git commit -m "chore: verify actuals [skip ci]"
+          git pull --rebase
+          git push
