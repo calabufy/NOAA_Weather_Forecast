@@ -11,14 +11,13 @@
 from __future__ import annotations
 
 import logging
-from contextlib import suppress
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
 from app import config, metrics, timeutil
-from app.bot import formatting, live
+from app.bot import formatting
 from app.db import repo
 
 log = logging.getLogger(__name__)
@@ -58,20 +57,28 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("forecast"))
 async def cmd_forecast(message: Message) -> None:
-    # Ленивый забор свежего цикла в момент запроса (не из БД): пользователю нужен
-    # актуальнейший прогноз, а не «зачётный». Кэш в live гасит повторные заборы.
-    # Забор может занять секунды (качаем бюллетень) — показываем плашку загрузки,
-    # затем удаляем её и шлём готовый прогноз.
-    loading = await message.answer("Загрузка прогноза...")
+    # Прогноз читается из БД (её каждые ~6 часов пополняет fetch-джоб), а не
+    # живым забором бюллетеней (app/bot/live.py, исторический режим VPS):
+    # в webhook-режиме Telegram ждёт ответа не дольше 60 секунд, скачивание
+    # NBS (~28 МБ) в лимит не укладывается и блокирует доставку всех апдейтов.
+    # Цена — прогноз может отставать от свежайшего цикла максимум на ~6 часов.
+    target = timeutil.la_tomorrow()
     try:
-        target, points = await live.forecast_tomorrow()
+        conn = repo.connect()
+        try:
+            points = {
+                model: repo.latest_forecast(conn, target, model)
+                for model in config.BOT_MODELS
+            }
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001 — пользователь должен получить ответ при сбое
         log.exception("сбой /forecast")
         await message.answer("Не удалось получить прогноз, попробуйте позже.")
         return
-    finally:
-        with suppress(Exception):
-            await loading.delete()
+    if not any(points.values()):
+        await message.answer("Прогноз на завтра ещё не собран, попробуйте позже.")
+        return
     await message.answer(formatting.format_forecast(target, points))
 
 

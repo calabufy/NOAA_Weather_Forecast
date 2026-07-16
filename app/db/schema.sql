@@ -30,3 +30,43 @@ CREATE TABLE IF NOT EXISTS actuals (
     source     TEXT NOT NULL,     -- 'CLI' | 'METAR'
     fetched_at TEXT NOT NULL      -- момент записи, ISO-UTC
 );
+
+-- Изолированный интернет-архив. Одна строка = зачётный прогноз (последний цикл
+-- до local midnight target_date) + официальный факт. Эти строки никогда не
+-- участвуют в оперативных /forecast и /errors.
+CREATE TABLE IF NOT EXISTS historical_model_daily (
+    target_date       TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    cycle             TEXT NOT NULL,
+    forecast_tmax_f   REAL NOT NULL,
+    actual_tmax_f     REAL NOT NULL,
+    error_f           REAL NOT NULL,
+    abs_error_f       REAL NOT NULL,
+    forecast_source   TEXT NOT NULL,
+    actual_source     TEXT NOT NULL,
+    imported_at       TEXT NOT NULL,
+    PRIMARY KEY (target_date, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_model_daily_model_date
+    ON historical_model_daily(model, target_date);
+
+-- Готовые агрегаты за импортированный период: по одной строке на модель.
+CREATE TABLE IF NOT EXISTS historical_model_metrics (
+    model               TEXT NOT NULL,
+    period_start        TEXT NOT NULL,
+    period_end          TEXT NOT NULL,
+    n                   INTEGER NOT NULL,
+    mae                 REAL NOT NULL,
+    bias                REAL NOT NULL,
+    rmse                REAL NOT NULL,
+    hit_rate_1f         REAL NOT NULL,
+    hit_rate_2f         REAL NOT NULL,
+    hit_rate_3f         REAL NOT NULL,
+    max_abs_error       REAL NOT NULL,
+    max_abs_error_date  TEXT NOT NULL,
+    forecast_source     TEXT NOT NULL,
+    actual_source       TEXT NOT NULL,
+    computed_at         TEXT NOT NULL,
+    PRIMARY KEY (model, period_start, period_end)
+);

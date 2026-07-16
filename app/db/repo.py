@@ -30,3 +30,6 @@ latest_forecast = _impl.latest_forecast
 get_actual = _impl.get_actual
 list_actuals = _impl.list_actuals
 error_series = _impl.error_series
+upsert_historical_days = _impl.upsert_historical_days
+upsert_historical_metrics = _impl.upsert_historical_metrics
+historical_error_series = _impl.historical_error_series

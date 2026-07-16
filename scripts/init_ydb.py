@@ -26,7 +26,10 @@ def main() -> None:
         ydb_repo.init_db(conn)
     finally:
         conn.close()
-    log.info("таблицы forecasts/actuals созданы (или уже существовали)")
+    log.info(
+        "таблицы forecasts/actuals и historical_model_* созданы "
+        "(или уже существовали)"
+    )
 
 
 if __name__ == "__main__":

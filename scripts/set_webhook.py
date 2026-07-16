@@ -41,6 +41,8 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # httpx логирует полный URL запроса; для Bot API он содержит секретный токен.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(description="Установить/снять webhook Telegram.")
     p.add_argument("url", nargs="?", help="публичный URL функции bot-webhook")
     p.add_argument(
@@ -65,6 +67,10 @@ def main() -> None:
     payload: dict = {
         "url": args.url,
         "drop_pending_updates": False,
+        # Последовательная доставка важна для serverless: при холодном старте
+        # несколько одновременных апдейтов создают несколько тяжёлых инстансов,
+        # а Telegram успевает оборвать соединения до ответа функции.
+        "max_connections": 1,
         # Бот обрабатывает только сообщения — не будим функцию ради прочего.
         "allowed_updates": ["message"],
     }

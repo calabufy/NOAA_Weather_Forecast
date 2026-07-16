@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone
 import ydb
 
 from app import config, timeutil
+from app.db.historical import HistoricalModelDay, HistoricalModelMetric
 from app.sources import ActualTmax, ForecastPoint
 
 UTC = timezone.utc
@@ -111,6 +112,41 @@ def init_db(conn: Connection) -> None:
             `source`   Utf8 NOT NULL,     -- 'CLI' | 'METAR'
             fetched_at Utf8 NOT NULL,     -- момент записи, ISO-UTC
             PRIMARY KEY (`date`)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS historical_model_daily (
+            target_date       Utf8 NOT NULL,
+            model             Utf8 NOT NULL,
+            cycle             Utf8 NOT NULL,
+            forecast_tmax_f   Double NOT NULL,
+            actual_tmax_f     Double NOT NULL,
+            error_f           Double NOT NULL,
+            abs_error_f       Double NOT NULL,
+            forecast_source   Utf8 NOT NULL,
+            actual_source     Utf8 NOT NULL,
+            imported_at       Utf8 NOT NULL,
+            PRIMARY KEY (target_date, model)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS historical_model_metrics (
+            model               Utf8 NOT NULL,
+            period_start        Utf8 NOT NULL,
+            period_end          Utf8 NOT NULL,
+            n                   Uint64 NOT NULL,
+            mae                 Double NOT NULL,
+            bias                Double NOT NULL,
+            rmse                Double NOT NULL,
+            hit_rate_1f         Double NOT NULL,
+            hit_rate_2f         Double NOT NULL,
+            hit_rate_3f         Double NOT NULL,
+            max_abs_error       Double NOT NULL,
+            max_abs_error_date  Utf8 NOT NULL,
+            forecast_source     Utf8 NOT NULL,
+            actual_source       Utf8 NOT NULL,
+            computed_at         Utf8 NOT NULL,
+            PRIMARY KEY (model, period_start, period_end)
         )
         """,
     ]
@@ -311,6 +347,101 @@ def error_series(
         (actual.date, official[actual.date], actual.tmax_f)
         for actual in actuals
         if actual.date in official
+    ]
+
+
+# --- Изолированный интернет-архив -------------------------------------------
+
+def _chunks(rows: list, size: int = 40):
+    for start in range(0, len(rows), size):
+        yield rows[start:start + size]
+
+
+def upsert_historical_days(
+    conn: Connection, rows: list[HistoricalModelDay]
+) -> int:
+    """Пакетно UPSERT'ить архивные дневные пары отдельно от live-таблиц."""
+    now = _now_iso()
+    columns = (
+        "target_date", "model", "cycle", "forecast_tmax_f", "actual_tmax_f",
+        "error_f", "abs_error_f", "forecast_source", "actual_source", "imported_at",
+    )
+    for chunk in _chunks(rows):
+        params: dict[str, object] = {}
+        values: list[str] = []
+        for i, row in enumerate(chunk):
+            names = [f"${column}_{i}" for column in columns]
+            values.append("(" + ", ".join(names) + ")")
+            data = (
+                _fmt_date(row.target_date), row.model, _fmt_cycle(row.cycle),
+                float(row.forecast_tmax_f), float(row.actual_tmax_f),
+                float(row.error_f), float(row.abs_error_f),
+                row.forecast_source, row.actual_source, now,
+            )
+            params.update(zip(names, data))
+        conn.pool.execute_with_retries(
+            "UPSERT INTO historical_model_daily ("
+            + ", ".join(columns)
+            + ") VALUES "
+            + ", ".join(values),
+            params,
+        )
+    return len(rows)
+
+
+def upsert_historical_metrics(
+    conn: Connection, rows: list[HistoricalModelMetric]
+) -> int:
+    """UPSERT'ить готовые агрегаты архивного периода."""
+    now = _now_iso()
+    columns = (
+        "model", "period_start", "period_end", "n", "mae", "bias", "rmse",
+        "hit_rate_1f", "hit_rate_2f", "hit_rate_3f", "max_abs_error",
+        "max_abs_error_date", "forecast_source", "actual_source", "computed_at",
+    )
+    params: dict[str, object] = {}
+    values: list[str] = []
+    for i, row in enumerate(rows):
+        names = [f"${column}_{i}" for column in columns]
+        values.append("(" + ", ".join(names) + ")")
+        data = (
+            row.model, _fmt_date(row.period_start), _fmt_date(row.period_end),
+            ydb.TypedValue(int(row.n), ydb.PrimitiveType.Uint64),
+            float(row.mae), float(row.bias), float(row.rmse),
+            float(row.hit_rate_1f), float(row.hit_rate_2f), float(row.hit_rate_3f),
+            float(row.max_abs_error), _fmt_date(row.max_abs_error_date),
+            row.forecast_source, row.actual_source, now,
+        )
+        params.update(zip(names, data))
+    if rows:
+        conn.pool.execute_with_retries(
+            "UPSERT INTO historical_model_metrics ("
+            + ", ".join(columns)
+            + ") VALUES "
+            + ", ".join(values),
+            params,
+        )
+    return len(rows)
+
+
+def historical_error_series(
+    conn: Connection, model: str, start: date, end: date
+) -> list[tuple[date, float, float]]:
+    """Архивные (дата, прогноз, факт), полностью отдельно от live-данных."""
+    rows = _query(
+        conn,
+        """
+        SELECT target_date, forecast_tmax_f, actual_tmax_f
+        FROM historical_model_daily
+        WHERE model = $model AND target_date BETWEEN $start AND $end
+        ORDER BY target_date
+        """,
+        {"$model": model, "$start": _fmt_date(start), "$end": _fmt_date(end)},
+    )
+    return [
+        (date.fromisoformat(row["target_date"]),
+         row["forecast_tmax_f"], row["actual_tmax_f"])
+        for row in rows
     ]
 
 

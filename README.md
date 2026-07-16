@@ -300,11 +300,13 @@ LA_Weather_Forecast/
 
 ## 13. Деплой в Yandex Cloud Functions (Фаза 6)
 
-Архитектура в облаке: две функции из одного архива кода — `la-weather-bot-webhook`
-(webhook Telegram, entrypoint `handler.bot_webhook`) и `la-weather-jobs`
-(fetch/verify, entrypoint `handler.job`, вызывается таймер-триггерами); данные —
-в YDB Serverless (`DB_BACKEND=ydb`, см. `app/db/repo.py`). Всё укладывается в
-бесплатные лимиты YCF/YDB при нагрузке личного бота.
+Архитектура в облаке: три функции из одного архива кода — `la-weather-bot-poll`
+(забирает Telegram updates раз в минуту через `getUpdates`, entrypoint
+`handler.bot_poll`), резервная `la-weather-bot-webhook` и `la-weather-jobs`
+(fetch/verify, entrypoint `handler.job`, вызывается таймер-триггерами). Данные —
+в YDB Serverless (`DB_BACKEND=ydb`, см. `app/db/repo.py`). Polling используется
+потому, что входящие соединения Telegram к публичным endpoint'ам Yandex Cloud
+в этой конфигурации нестабильны; исходящие Bot API-запросы работают.
 
 Разовая настройка (PowerShell, требуется настроенный `yc init`):
 
@@ -328,9 +330,9 @@ $env:YDB_ACCESS_TOKEN_CREDENTIALS = (yc iam create-token)
 python -m scripts.init_ydb
 python -m scripts.migrate_to_ydb data/la_weather.db
 
-# 5. Задеплоить функции и открыть публичный вызов webhook-функции.
+# 5. Задеплоить функции. Скрипт также создаст минутный polling-триггер.
 powershell -File scripts\deploy.ps1
-yc serverless function allow-unauthenticated-invoke la-weather-bot-webhook
+python -m scripts.set_webhook --delete
 
 # 6. Таймер-триггеры (cron в UTC — те же времена, что были в GitHub Actions).
 yc serverless trigger create timer --name la-weather-fetch `
@@ -340,17 +342,47 @@ yc serverless trigger create timer --name la-weather-verify `
   --cron-expression '0 16,22 ? * * *' --payload '{"job": "verify"}' `
   --invoke-function-name la-weather-jobs --invoke-function-service-account-id $SA_ID
 
-# 7. Переключить Telegram на webhook (polling с этого момента перестаёт работать).
-python -m scripts.set_webhook https://functions.yandexcloud.net/<id-функции-из-шага-5>
 ```
 
 Повторный деплой после изменения кода — просто `powershell -File scripts\deploy.ps1`.
-Откат на polling: `python -m scripts.set_webhook --delete` (и снова работают
-GitHub Actions / локальный `python -m app.main`).
+Webhook должен оставаться снятым, иначе Telegram запретит `getUpdates`.
 
-Проверка после деплоя: послать боту `/forecast` и `/errors`; джобы можно дёрнуть
-руками — `yc serverless function invoke --name la-weather-jobs --data '{"job": "verify"}'`;
-логи — `yc serverless function logs la-weather-jobs`.
+Проверка после деплоя: послать боту `/forecast` и `/errors` и подождать до минуты;
+polling можно дёрнуть вручную — `yc serverless function invoke --name
+la-weather-bot-poll --data '{}'`; джобы — `yc serverless function invoke --name
+la-weather-jobs --data '{"job": "verify"}'`; логи — `yc serverless function logs
+la-weather-bot-poll`.
 
 После 1–2 недель стабильной работы: удалить `.github/workflows/bot-poll.yml`,
 `weather-jobs.yml`, `verify-actuals.yml` и `data/la_weather.db` (история живёт в YDB).
+
+---
+
+## 14. Отдельный интернет-архив метрик
+
+Исторические данные из интернета намеренно не смешиваются с оперативными
+`forecasts`/`actuals`:
+
+- `historical_model_daily` — зачётный прогноз, факт и ошибка по каждой
+  дате/модели;
+- `historical_model_metrics` — MAE, bias, RMSE, hit-rate для 1/2/3°F и худшая
+  ошибка за импортированный период.
+
+Прогнозы берутся из [IEM MOS Archive](https://mesonet.agron.iastate.edu/mos/)
+для KLAX (`NBS → NBM`, `GFS → MAV`, `NAM → MET`), фактический Tmax — из
+[NOAA NCEI Daily Summaries](https://www.ncei.noaa.gov/access/services/data/v1)
+для станции `USW00023174`. Для каждой локальной даты LA выбирается последний
+цикл до полуночи — то же правило, что в оперативной статистике.
+
+Повторяемый импорт последних 365 дней в выбранный `DB_BACKEND`:
+
+```powershell
+python -m scripts.backfill_historical_metrics --days 365
+```
+
+Только пересчёт агрегатов из уже загруженной `historical_model_daily`:
+
+```powershell
+python -m scripts.backfill_historical_metrics `
+  --start 2025-07-16 --end 2026-07-15 --metrics-only
+```

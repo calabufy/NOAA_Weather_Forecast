@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -22,12 +23,12 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import Update
 
 from app import config
 from app.bot import handlers, middleware
 from app.db import repo
-from app.jobs import fetch_forecasts, verify
 
 logging.basicConfig(
     level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
@@ -38,10 +39,25 @@ log = logging.getLogger(__name__)
 # постоянного loop бота в serverless нет. Установка идемпотентна.
 middleware.install_sync_alert_handler(config.BOT_TOKEN, config.ALLOWED_CHAT_IDS)
 
-_JOBS = {
-    "fetch": fetch_forecasts.run,
-    "verify": verify.run,
-}
+_JOB_NAMES = frozenset({"fetch", "verify"})
+
+
+def _job_runner(name: str):
+    """Импортировать тяжёлый код джоба только в jobs-функции.
+
+    Обе Cloud Functions используют один архив и модуль entrypoint. Глобальные
+    импорты jobs/sources замедляли холодный старт Telegram webhook, хотя боту
+    этот код не нужен.
+    """
+    if name == "fetch":
+        from app.jobs import fetch_forecasts
+
+        return fetch_forecasts.run
+    if name == "verify":
+        from app.jobs import verify
+
+        return verify.run
+    raise ValueError(f"неизвестный джоб {name!r} (ожидается {sorted(_JOB_NAMES)})")
 
 # Dispatcher без состояния соединений — безопасно шарить между тёплыми вызовами.
 _dp = Dispatcher()
@@ -95,6 +111,60 @@ async def bot_webhook(event: dict, context) -> dict:
     return {"statusCode": 200, "body": "ok"}
 
 
+# --- Telegram timer polling -------------------------------------------------
+
+async def _poll_once() -> int:
+    """Забрать и обработать одну пачку Telegram updates.
+
+    Резервный режим для сетей, из которых Telegram не может стабильно вызвать
+    публичный webhook Yandex Cloud. После успешной обработки всей пачки второй
+    getUpdates подтверждает offset; при аварии Telegram отдаст пачку повторно.
+    """
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    try:
+        try:
+            updates = await bot.get_updates(
+                limit=100,
+                timeout=0,
+                allowed_updates=["message"],
+                request_timeout=8,
+            )
+        except TelegramNetworkError as exc:
+            # Стандартный aiohttp timeout aiogram — около минуты. При временной
+            # недоступности Telegram он перекрывал следующий минутный trigger и
+            # превращал задержку ответа в несколько минут. Следующий poll скоро
+            # повторится, поэтому завершаем этот вызов штатно и быстро.
+            log.warning("polling: getUpdates недоступен, повторю: %s", exc)
+            return 0
+        for update in updates:
+            log.info("polling: обрабатываю update_id=%s", update.update_id)
+            await _dp.feed_update(bot, update)
+        if updates:
+            # offset=N подтверждает все update_id < N. Возвращённые этим
+            # запросом более новые апдейты останутся неподтверждёнными и будут
+            # обработаны следующим минутным запуском.
+            await bot.get_updates(
+                offset=updates[-1].update_id + 1,
+                limit=1,
+                timeout=0,
+                allowed_updates=["message"],
+                request_timeout=8,
+            )
+        return len(updates)
+    finally:
+        await bot.session.close()
+
+
+def bot_poll(event: dict, context) -> dict:
+    """YCF entrypoint для timer-trigger: один короткий getUpdates-запрос."""
+    count = asyncio.run(_poll_once())
+    log.info("polling: обработано обновлений: %s", count)
+    return {"processed": count}
+
+
 # --- Фоновые джобы (таймер-триггеры) ----------------------------------------
 
 def _job_name(event: dict | None) -> str:
@@ -123,9 +193,7 @@ def _job_name(event: dict | None) -> str:
 def job(event: dict, context) -> dict:
     """Запустить один фоновый джоб (fetch/verify) — вызывается таймер-триггером."""
     name = _job_name(event)
-    run = _JOBS.get(name)
-    if run is None:
-        raise ValueError(f"неизвестный джоб {name!r} (ожидается {sorted(_JOBS)})")
+    run = _job_runner(name)
     conn = repo.connect()
     try:
         result = run(conn)

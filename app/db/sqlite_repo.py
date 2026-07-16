@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app import config, timeutil
+from app.db.historical import HistoricalModelDay, HistoricalModelMetric
 from app.sources import ActualTmax, ForecastPoint
 
 UTC = timezone.utc
@@ -57,7 +58,7 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     """Применить schema.sql (идемпотентно: все CREATE ... IF NOT EXISTS)."""
-    conn.executescript(_SCHEMA_PATH.read_text())
+    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.commit()
 
 
@@ -239,6 +240,105 @@ def error_series(
         (actual.date, official[actual.date], actual.tmax_f)
         for actual in actuals
         if actual.date in official
+    ]
+
+
+# --- Изолированный интернет-архив -----------------------------------------
+
+def upsert_historical_days(
+    conn: sqlite3.Connection, rows: list[HistoricalModelDay]
+) -> int:
+    """Идемпотентно записать дневные архивные пары, не трогая live-таблицы."""
+    now = _now_iso()
+    conn.executemany(
+        """
+        INSERT INTO historical_model_daily (
+            target_date, model, cycle, forecast_tmax_f, actual_tmax_f,
+            error_f, abs_error_f, forecast_source, actual_source, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(target_date, model) DO UPDATE SET
+            cycle           = excluded.cycle,
+            forecast_tmax_f = excluded.forecast_tmax_f,
+            actual_tmax_f   = excluded.actual_tmax_f,
+            error_f         = excluded.error_f,
+            abs_error_f     = excluded.abs_error_f,
+            forecast_source = excluded.forecast_source,
+            actual_source   = excluded.actual_source,
+            imported_at     = excluded.imported_at
+        """,
+        [
+            (
+                _fmt_date(row.target_date), row.model, _fmt_cycle(row.cycle),
+                float(row.forecast_tmax_f), float(row.actual_tmax_f),
+                float(row.error_f), float(row.abs_error_f),
+                row.forecast_source, row.actual_source, now,
+            )
+            for row in rows
+        ],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def upsert_historical_metrics(
+    conn: sqlite3.Connection, rows: list[HistoricalModelMetric]
+) -> int:
+    """Идемпотентно сохранить агрегаты архивного периода."""
+    now = _now_iso()
+    conn.executemany(
+        """
+        INSERT INTO historical_model_metrics (
+            model, period_start, period_end, n, mae, bias, rmse,
+            hit_rate_1f, hit_rate_2f, hit_rate_3f,
+            max_abs_error, max_abs_error_date,
+            forecast_source, actual_source, computed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(model, period_start, period_end) DO UPDATE SET
+            n                  = excluded.n,
+            mae                = excluded.mae,
+            bias               = excluded.bias,
+            rmse               = excluded.rmse,
+            hit_rate_1f        = excluded.hit_rate_1f,
+            hit_rate_2f        = excluded.hit_rate_2f,
+            hit_rate_3f        = excluded.hit_rate_3f,
+            max_abs_error      = excluded.max_abs_error,
+            max_abs_error_date = excluded.max_abs_error_date,
+            forecast_source    = excluded.forecast_source,
+            actual_source      = excluded.actual_source,
+            computed_at        = excluded.computed_at
+        """,
+        [
+            (
+                row.model, _fmt_date(row.period_start), _fmt_date(row.period_end),
+                row.n, row.mae, row.bias, row.rmse,
+                row.hit_rate_1f, row.hit_rate_2f, row.hit_rate_3f,
+                row.max_abs_error, _fmt_date(row.max_abs_error_date),
+                row.forecast_source, row.actual_source, now,
+            )
+            for row in rows
+        ],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def historical_error_series(
+    conn: sqlite3.Connection, model: str, start: date, end: date
+) -> list[tuple[date, float, float]]:
+    """Архивные (дата, прогноз, факт), полностью отдельно от live-данных."""
+    rows = conn.execute(
+        """
+        SELECT target_date, forecast_tmax_f, actual_tmax_f
+        FROM historical_model_daily
+        WHERE model = ? AND target_date BETWEEN ? AND ?
+        ORDER BY target_date
+        """,
+        (model, _fmt_date(start), _fmt_date(end)),
+    ).fetchall()
+    return [
+        (date.fromisoformat(row["target_date"]),
+         row["forecast_tmax_f"], row["actual_tmax_f"])
+        for row in rows
     ]
 
 
