@@ -1,0 +1,8 @@
+# requirements.txt — зависимости для сборки версий Yandex Cloud Functions
+# (YCF ставит пакеты из этого файла при создании версии; см. scripts/deploy.ps1).
+# Держать в согласии с pyproject.toml. APScheduler и python-dotenv в облаке не
+# нужны: расписание — таймер-триггеры, конфиг — окружение функции.
+aiogram>=3.4
+httpx>=0.27
+tenacity>=8.2
+ydb>=3.18

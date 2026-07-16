@@ -95,6 +95,18 @@ METAR_URL_TEMPLATE = os.getenv(
 MODEL_CYCLES = ("00", "06", "12", "18")
 
 # --- База данных -----------------------------------------------------------
+# Бэкенд хранилища (см. фасад app/db/repo.py):
+#   'sqlite' (дефолт) — файл SQLite, локальная разработка и тесты;
+#   'ydb'             — YDB Serverless, продакшен в Yandex Cloud Functions.
+DB_BACKEND = os.getenv("DB_BACKEND", "sqlite").strip().lower()
+
+# Подключение к YDB (используется только при DB_BACKEND=ydb). Endpoint и путь
+# базы берутся со страницы базы в консоли Yandex Cloud. Аутентификация — через
+# стандартные переменные ydb-SDK (YDB_METADATA_CREDENTIALS=1 в функциях,
+# YDB_ACCESS_TOKEN_CREDENTIALS/ключ SA локально) — см. app/db/ydb_repo.py.
+YDB_ENDPOINT = os.getenv("YDB_ENDPOINT", "grpcs://ydb.serverless.yandexcloud.net:2135")
+YDB_DATABASE = os.getenv("YDB_DATABASE", "")
+
 # Путь к файлу SQLite. По умолчанию — в корне проекта; в Docker монтируется на
 # volume. Хранит forecasts и actuals (см. app/db/schema.sql).
 #
@@ -136,6 +148,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ALLOWED_CHAT_IDS = frozenset(
     int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if x
 )
+
+# Секрет webhook Telegram (Yandex Cloud Functions): при установке webhook
+# (scripts/set_webhook.py) передаётся Telegram'у, а handler.bot_webhook сверяет
+# заголовок X-Telegram-Bot-Api-Secret-Token — чтобы публичный URL функции не
+# принимал поддельные «апдейты» от кого попало. Пустой = проверка выключена.
+TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "")
 
 # Модели, показываемые в боте (порядок = порядок вывода; NBM — основной).
 BOT_MODELS = ("NBM", "MAV", "MET")

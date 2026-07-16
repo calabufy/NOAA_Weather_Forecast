@@ -266,6 +266,13 @@ LA_Weather_Forecast/
 - [x] Бэкфилл фактов из архива. (`scripts/backfill.py`: CLI-архив CLILAX + добор METAR, приоритет CLI; проверен вживую на окне 6 суток.)
 - [ ] 7–14 дней наблюдения: сверять факт с официальным CLI вручную, убедиться в корректности циклов и таймзон. (Выполняется на VPS после деплоя.)
 
+### Фаза 6 — миграция на Yandex Cloud Functions (serverless)
+- [x] Слой БД с двумя бэкендами: `sqlite` (локально/тесты) и `ydb` (YDB Serverless) за фасадом `app/db/repo.py`.
+- [x] `handler.py`: entrypoint'ы `bot_webhook` (webhook Telegram вместо polling) и `job` (fetch/verify по таймер-триггерам).
+- [x] Скрипты: `init_ydb.py` (таблицы), `migrate_to_ydb.py` (перенос истории из SQLite), `set_webhook.py`, `deploy.ps1`.
+- [ ] Настройка облака и деплой (раздел 13) — выполняется вручную.
+- [ ] После обкатки в облаке: удалить воркфлоу `bot-poll.yml`, `weather-jobs.yml`, `verify-actuals.yml` и файл `data/la_weather.db` из репозитория (до этого GitHub Actions остаётся рабочей схемой хостинга).
+
 **Итого активной разработки: ~4–5 дней.**
 
 ---
@@ -285,6 +292,65 @@ LA_Weather_Forecast/
 
 ## 12. Что пересмотреть при росте системы
 
-- SQLite → Postgres при нескольких станциях/пользователях или конкурентной записи.
-- Long polling → webhook при публичном хостинге.
+- SQLite → Postgres при нескольких станциях/пользователях или конкурентной записи. (Частично закрыто Фазой 6: в облаке — YDB Serverless.)
+- ~~Long polling → webhook при публичном хостинге.~~ Сделано в Фазе 6.
 - Добавить графики ошибок (matplotlib → PNG в телеграм) — естественная третья команда.
+
+---
+
+## 13. Деплой в Yandex Cloud Functions (Фаза 6)
+
+Архитектура в облаке: две функции из одного архива кода — `la-weather-bot-webhook`
+(webhook Telegram, entrypoint `handler.bot_webhook`) и `la-weather-jobs`
+(fetch/verify, entrypoint `handler.job`, вызывается таймер-триггерами); данные —
+в YDB Serverless (`DB_BACKEND=ydb`, см. `app/db/repo.py`). Всё укладывается в
+бесплатные лимиты YCF/YDB при нагрузке личного бота.
+
+Разовая настройка (PowerShell, требуется настроенный `yc init`):
+
+```powershell
+# 1. Сервисный аккаунт функций: доступ к YDB + право вызова функций для триггеров.
+yc iam service-account create --name la-weather-sa
+$SA_ID = (yc iam service-account get --name la-weather-sa --format json | ConvertFrom-Json).id
+$FOLDER_ID = (yc config get folder-id)
+yc resource-manager folder add-access-binding $FOLDER_ID --role ydb.editor --subject serviceAccount:$SA_ID
+yc resource-manager folder add-access-binding $FOLDER_ID --role functions.functionInvoker --subject serviceAccount:$SA_ID
+
+# 2. База YDB Serverless; endpoint и путь базы — в .env (YDB_ENDPOINT/YDB_DATABASE).
+yc ydb database create la-weather --serverless
+yc ydb database get --name la-weather --format json   # поля endpoint / database
+
+# 3. Заполнить .env: YDB_DATABASE, YC_SERVICE_ACCOUNT_ID=$SA_ID,
+#    TG_WEBHOOK_SECRET (случайная строка), остальное как раньше.
+
+# 4. Создать таблицы и перенести историю из SQLite (локально, под своим IAM-токеном).
+$env:YDB_ACCESS_TOKEN_CREDENTIALS = (yc iam create-token)
+python -m scripts.init_ydb
+python -m scripts.migrate_to_ydb data/la_weather.db
+
+# 5. Задеплоить функции и открыть публичный вызов webhook-функции.
+powershell -File scripts\deploy.ps1
+yc serverless function allow-unauthenticated-invoke la-weather-bot-webhook
+
+# 6. Таймер-триггеры (cron в UTC — те же времена, что были в GitHub Actions).
+yc serverless trigger create timer --name la-weather-fetch `
+  --cron-expression '30 5,11,17,23 ? * * *' --payload '{"job": "fetch"}' `
+  --invoke-function-name la-weather-jobs --invoke-function-service-account-id $SA_ID
+yc serverless trigger create timer --name la-weather-verify `
+  --cron-expression '0 16,22 ? * * *' --payload '{"job": "verify"}' `
+  --invoke-function-name la-weather-jobs --invoke-function-service-account-id $SA_ID
+
+# 7. Переключить Telegram на webhook (polling с этого момента перестаёт работать).
+python -m scripts.set_webhook https://functions.yandexcloud.net/<id-функции-из-шага-5>
+```
+
+Повторный деплой после изменения кода — просто `powershell -File scripts\deploy.ps1`.
+Откат на polling: `python -m scripts.set_webhook --delete` (и снова работают
+GitHub Actions / локальный `python -m app.main`).
+
+Проверка после деплоя: послать боту `/forecast` и `/errors`; джобы можно дёрнуть
+руками — `yc serverless function invoke --name la-weather-jobs --data '{"job": "verify"}'`;
+логи — `yc serverless function logs la-weather-jobs`.
+
+После 1–2 недель стабильной работы: удалить `.github/workflows/bot-poll.yml`,
+`weather-jobs.yml`, `verify-actuals.yml` и `data/la_weather.db` (история живёт в YDB).

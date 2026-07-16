@@ -9,11 +9,13 @@ import html
 import logging
 from typing import Any, Awaitable, Callable
 
+import httpx
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 
 log = logging.getLogger(__name__)
 _TELEGRAM_ALERT_TEXT_LIMIT = 3500
+_TELEGRAM_SEND_TIMEOUT = 10.0
 
 
 class AllowlistMiddleware(BaseMiddleware):
@@ -93,6 +95,66 @@ class TelegramAlertHandler(logging.Handler):
             await self._bot.send_message(chat_id, text)
         except Exception:  # noqa: BLE001 — best-effort, сбой алерта не критичен
             log.warning("не удалось отправить алерт в chat_id=%s", chat_id)
+
+
+class SyncTelegramAlertHandler(logging.Handler):
+    """Синхронный вариант TelegramAlertHandler для Yandex Cloud Functions.
+
+    В serverless-режиме нет постоянно живущего loop бота, на который можно было
+    бы планировать отправку (джобы — обычный синхронный код, webhook-вызов
+    завершается вместе с ответом), поэтому алерт шлётся прямым HTTP-запросом к
+    Bot API. Фильтр логгеров и «best-effort»-семантика те же, что у async-версии.
+    """
+
+    ALERT_LOGGER_PREFIXES = TelegramAlertHandler.ALERT_LOGGER_PREFIXES
+
+    def __init__(
+        self, bot_token: str, chat_ids: frozenset[int], level: int = logging.ERROR
+    ) -> None:
+        super().__init__(level=level)
+        self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self._chat_ids = chat_ids
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not record.name.startswith(self.ALERT_LOGGER_PREFIXES):
+            return
+        try:
+            text = self.format(record)
+        except Exception:  # noqa: BLE001 — форматирование лога не должно падать
+            return
+        escaped = html.escape(text[:_TELEGRAM_ALERT_TEXT_LIMIT], quote=False)
+        text = f"⚠️ Ошибка пайплайна:\n<pre>{escaped}</pre>"
+        for chat_id in self._chat_ids:
+            try:
+                httpx.post(
+                    self._url,
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                    timeout=_TELEGRAM_SEND_TIMEOUT,
+                )
+            except Exception:  # noqa: BLE001 — сбой алерта не критичен
+                log.warning("не удалось отправить алерт в chat_id=%s", chat_id)
+
+
+def install_sync_alert_handler(
+    bot_token: str, chat_ids: frozenset[int]
+) -> SyncTelegramAlertHandler | None:
+    """Повесить SyncTelegramAlertHandler на корневой логгер (идемпотентно).
+
+    Возвращает установленный handler (или None: пустой allowlist / нет токена /
+    уже установлен — повторная установка дублировала бы алерты).
+    """
+    if not bot_token or not chat_ids:
+        log.warning("sync-алерты выключены: нет токена или allowlist пуст")
+        return None
+    root = logging.getLogger()
+    if any(isinstance(h, SyncTelegramAlertHandler) for h in root.handlers):
+        return None
+    handler = SyncTelegramAlertHandler(bot_token, chat_ids)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+    return handler
 
 
 def install_alert_handler(
