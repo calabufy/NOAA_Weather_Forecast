@@ -31,10 +31,13 @@ CREATE TABLE IF NOT EXISTS actuals (
     fetched_at TEXT NOT NULL      -- момент записи, ISO-UTC
 );
 
--- Изолированный интернет-архив. Одна строка = зачётный прогноз (последний цикл
--- до local midnight target_date) + официальный факт. Эти строки никогда не
--- участвуют в оперативных /forecast и /errors.
-CREATE TABLE IF NOT EXISTS historical_model_daily (
+-- Единая таблица дневных ошибок за всё время: зачётный прогноз (последний цикл
+-- до local midnight target_date) + факт + ошибка. Наполняется двумя писателями:
+-- бэкфилл интернет-архива (scripts/backfill_daily_errors.py) и verify-джоб
+-- (оперативные дни, forecast_source='OPERATIONAL'). Оперативную строку архив
+-- не перезаписывает (правило в repo.upsert_daily_errors). /errors читает
+-- только эту таблицу; агрегаты по окнам считает app/metrics.py на лету.
+CREATE TABLE IF NOT EXISTS model_daily_errors (
     target_date       TEXT NOT NULL,
     model             TEXT NOT NULL,
     cycle             TEXT NOT NULL,
@@ -44,29 +47,9 @@ CREATE TABLE IF NOT EXISTS historical_model_daily (
     abs_error_f       REAL NOT NULL,
     forecast_source   TEXT NOT NULL,
     actual_source     TEXT NOT NULL,
-    imported_at       TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
     PRIMARY KEY (target_date, model)
 );
 
-CREATE INDEX IF NOT EXISTS idx_historical_model_daily_model_date
-    ON historical_model_daily(model, target_date);
-
--- Готовые агрегаты за импортированный период: по одной строке на модель.
-CREATE TABLE IF NOT EXISTS historical_model_metrics (
-    model               TEXT NOT NULL,
-    period_start        TEXT NOT NULL,
-    period_end          TEXT NOT NULL,
-    n                   INTEGER NOT NULL,
-    mae                 REAL NOT NULL,
-    bias                REAL NOT NULL,
-    rmse                REAL NOT NULL,
-    hit_rate_1f         REAL NOT NULL,
-    hit_rate_2f         REAL NOT NULL,
-    hit_rate_3f         REAL NOT NULL,
-    max_abs_error       REAL NOT NULL,
-    max_abs_error_date  TEXT NOT NULL,
-    forecast_source     TEXT NOT NULL,
-    actual_source       TEXT NOT NULL,
-    computed_at         TEXT NOT NULL,
-    PRIMARY KEY (model, period_start, period_end)
-);
+CREATE INDEX IF NOT EXISTS idx_model_daily_errors_model_date
+    ON model_daily_errors(model, target_date);

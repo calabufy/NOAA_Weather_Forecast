@@ -358,31 +358,31 @@ la-weather-bot-poll`.
 
 ---
 
-## 14. Отдельный интернет-архив метрик
+## 14. Единая таблица дневных ошибок (`model_daily_errors`)
 
-Исторические данные из интернета намеренно не смешиваются с оперативными
-`forecasts`/`actuals`:
+Все дневные ошибки моделей — архивные из интернета и оперативные от
+verify-джоба — живут в одной таблице `model_daily_errors` (зачётный прогноз,
+факт, ошибка на каждую дату/модель). Из неё читает `/errors`; агрегаты по
+окнам 7д/30д/сезон/год считает `app/metrics.py` на лету. Оперативные таблицы
+`forecasts`/`actuals` остаются источником для записи оперативных строк, но
+не участвуют в `/errors` напрямую.
 
-- `historical_model_daily` — зачётный прогноз, факт и ошибка по каждой
-  дате/модели;
-- `historical_model_metrics` — MAE, bias, RMSE, hit-rate для 1/2/3°F и худшая
-  ошибка за импортированный период.
+Два писателя и правило конфликтов:
 
-Прогнозы берутся из [IEM MOS Archive](https://mesonet.agron.iastate.edu/mos/)
-для KLAX (`NBS → NBM`, `GFS → MAV`, `NAM → MET`), фактический Tmax — из
-[NOAA NCEI Daily Summaries](https://www.ncei.noaa.gov/access/services/data/v1)
-для станции `USW00023174`. Для каждой локальной даты LA выбирается последний
-цикл до полуночи — то же правило, что в оперативной статистике.
+- `scripts/backfill_daily_errors.py` — интернет-архив: прогнозы из
+  [IEM MOS Archive](https://mesonet.agron.iastate.edu/mos/) для KLAX
+  (`NBS → NBM`, `GFS → MAV`, `NAM → MET`), фактический Tmax — из
+  [NOAA NCEI Daily Summaries](https://www.ncei.noaa.gov/access/services/data/v1)
+  для станции `USW00023174`; для каждой локальной даты LA выбирается последний
+  цикл до полуночи — то же правило, что в оперативной статистике;
+- verify-джоб — оперативные дни (`forecast_source='OPERATIONAL'`) из
+  собственных `forecasts`/`actuals` после записи факта.
+
+Оперативная строка не может быть перезаписана архивной (аналог приоритета
+CLI над METAR), поэтому бэкфилл можно безопасно перегонять.
 
 Повторяемый импорт последних 365 дней в выбранный `DB_BACKEND`:
 
 ```powershell
-python -m scripts.backfill_historical_metrics --days 365
-```
-
-Только пересчёт агрегатов из уже загруженной `historical_model_daily`:
-
-```powershell
-python -m scripts.backfill_historical_metrics `
-  --start 2025-07-16 --end 2026-07-15 --metrics-only
+python -m scripts.backfill_daily_errors --days 365
 ```

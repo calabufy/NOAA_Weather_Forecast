@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 import ydb
 
 from app import config, timeutil
-from app.db.historical import HistoricalModelDay, HistoricalModelMetric
+from app.db.daily_errors import OPERATIONAL_SOURCE, ModelDayError
 from app.sources import ActualTmax, ForecastPoint
 
 UTC = timezone.utc
@@ -114,8 +114,10 @@ def init_db(conn: Connection) -> None:
             PRIMARY KEY (`date`)
         )
         """,
+        # Единая таблица дневных ошибок за всё время (архив + оперативные дни);
+        # семантика колонок и правило конфликтов — см. app/db/daily_errors.py.
         """
-        CREATE TABLE IF NOT EXISTS historical_model_daily (
+        CREATE TABLE IF NOT EXISTS model_daily_errors (
             target_date       Utf8 NOT NULL,
             model             Utf8 NOT NULL,
             cycle             Utf8 NOT NULL,
@@ -125,28 +127,8 @@ def init_db(conn: Connection) -> None:
             abs_error_f       Double NOT NULL,
             forecast_source   Utf8 NOT NULL,
             actual_source     Utf8 NOT NULL,
-            imported_at       Utf8 NOT NULL,
+            updated_at        Utf8 NOT NULL,
             PRIMARY KEY (target_date, model)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS historical_model_metrics (
-            model               Utf8 NOT NULL,
-            period_start        Utf8 NOT NULL,
-            period_end          Utf8 NOT NULL,
-            n                   Uint64 NOT NULL,
-            mae                 Double NOT NULL,
-            bias                Double NOT NULL,
-            rmse                Double NOT NULL,
-            hit_rate_1f         Double NOT NULL,
-            hit_rate_2f         Double NOT NULL,
-            hit_rate_3f         Double NOT NULL,
-            max_abs_error       Double NOT NULL,
-            max_abs_error_date  Utf8 NOT NULL,
-            forecast_source     Utf8 NOT NULL,
-            actual_source       Utf8 NOT NULL,
-            computed_at         Utf8 NOT NULL,
-            PRIMARY KEY (model, period_start, period_end)
         )
         """,
     ]
@@ -350,23 +332,50 @@ def error_series(
     ]
 
 
-# --- Изолированный интернет-архив -------------------------------------------
+# --- Единая таблица дневных ошибок --------------------------------------------
 
 def _chunks(rows: list, size: int = 40):
     for start in range(0, len(rows), size):
         yield rows[start:start + size]
 
 
-def upsert_historical_days(
-    conn: Connection, rows: list[HistoricalModelDay]
-) -> int:
-    """Пакетно UPSERT'ить архивные дневные пары отдельно от live-таблиц."""
+def _protected_daily_keys(
+    conn: Connection, lo: str, hi: str
+) -> set[tuple[str, str]]:
+    """Ключи оперативных строк диапазона — их архиву перезаписывать нельзя."""
+    rows = _query(
+        conn,
+        """
+        SELECT target_date, model FROM model_daily_errors
+        WHERE forecast_source = $op AND target_date BETWEEN $lo AND $hi
+        """,
+        {"$op": OPERATIONAL_SOURCE, "$lo": lo, "$hi": hi},
+    )
+    return {(str(row["target_date"]), str(row["model"])) for row in rows}
+
+
+def upsert_daily_errors(conn: Connection, rows: list[ModelDayError]) -> int:
+    """Пакетно записать дневные ошибки; вернуть число записанных строк.
+
+    Правило конфликтов то же, что в sqlite_repo.upsert_daily_errors: оперативную
+    строку архив не перезаписывает. YQL не имеет условного ON CONFLICT, поэтому
+    защищённые ключи читаются одним запросом, фильтрация — в Python.
+    """
+    if not rows:
+        return 0
+    dates = [_fmt_date(row.target_date) for row in rows]
+    protected = _protected_daily_keys(conn, min(dates), max(dates))
+    to_write = [
+        row for row in rows
+        if row.forecast_source == OPERATIONAL_SOURCE
+        or (_fmt_date(row.target_date), row.model) not in protected
+    ]
     now = _now_iso()
     columns = (
         "target_date", "model", "cycle", "forecast_tmax_f", "actual_tmax_f",
-        "error_f", "abs_error_f", "forecast_source", "actual_source", "imported_at",
+        "error_f", "abs_error_f", "forecast_source", "actual_source", "updated_at",
     )
-    for chunk in _chunks(rows):
+    for chunk in _chunks(to_write):
         params: dict[str, object] = {}
         values: list[str] = []
         for i, row in enumerate(chunk):
@@ -380,59 +389,24 @@ def upsert_historical_days(
             )
             params.update(zip(names, data))
         conn.pool.execute_with_retries(
-            "UPSERT INTO historical_model_daily ("
+            "UPSERT INTO model_daily_errors ("
             + ", ".join(columns)
             + ") VALUES "
             + ", ".join(values),
             params,
         )
-    return len(rows)
+    return len(to_write)
 
 
-def upsert_historical_metrics(
-    conn: Connection, rows: list[HistoricalModelMetric]
-) -> int:
-    """UPSERT'ить готовые агрегаты архивного периода."""
-    now = _now_iso()
-    columns = (
-        "model", "period_start", "period_end", "n", "mae", "bias", "rmse",
-        "hit_rate_1f", "hit_rate_2f", "hit_rate_3f", "max_abs_error",
-        "max_abs_error_date", "forecast_source", "actual_source", "computed_at",
-    )
-    params: dict[str, object] = {}
-    values: list[str] = []
-    for i, row in enumerate(rows):
-        names = [f"${column}_{i}" for column in columns]
-        values.append("(" + ", ".join(names) + ")")
-        data = (
-            row.model, _fmt_date(row.period_start), _fmt_date(row.period_end),
-            ydb.TypedValue(int(row.n), ydb.PrimitiveType.Uint64),
-            float(row.mae), float(row.bias), float(row.rmse),
-            float(row.hit_rate_1f), float(row.hit_rate_2f), float(row.hit_rate_3f),
-            float(row.max_abs_error), _fmt_date(row.max_abs_error_date),
-            row.forecast_source, row.actual_source, now,
-        )
-        params.update(zip(names, data))
-    if rows:
-        conn.pool.execute_with_retries(
-            "UPSERT INTO historical_model_metrics ("
-            + ", ".join(columns)
-            + ") VALUES "
-            + ", ".join(values),
-            params,
-        )
-    return len(rows)
-
-
-def historical_error_series(
+def daily_error_series(
     conn: Connection, model: str, start: date, end: date
 ) -> list[tuple[date, float, float]]:
-    """Архивные (дата, прогноз, факт), полностью отдельно от live-данных."""
+    """(дата, прогноз, факт) модели из единой таблицы за [start, end]."""
     rows = _query(
         conn,
         """
         SELECT target_date, forecast_tmax_f, actual_tmax_f
-        FROM historical_model_daily
+        FROM model_daily_errors
         WHERE model = $model AND target_date BETWEEN $start AND $end
         ORDER BY target_date
         """,

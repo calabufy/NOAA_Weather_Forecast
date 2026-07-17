@@ -1,8 +1,131 @@
-# AGENTS.md — работа агентов с Yandex Cloud в этом проекте
+# AGENTS.md — гид по проекту для агентов
 
-Инструкция для AI-агентов (Claude Code и др.): как деплоить и обслуживать
-serverless-часть проекта. Написана по итогам реальной миграции 2026-07-16 —
-все «грабли» ниже случались на практике.
+Инструкция для AI-агентов (Claude Code и др.): архитектура приложения, как
+деплоить и обслуживать serverless-часть. Раздел про облако написан по итогам
+реальной миграции 2026-07-16 — все «грабли» там случались на практике.
+
+## Что это за приложение
+
+Личный сервис прогноза максимальной дневной температуры (Tmax) на станции
+**KLAX** (аэропорт Лос-Анджелеса): ежедневно собирает прогнозы трёх
+статистических моделей NOAA (**NBM**, **MAV**, **MET**), после окончания суток
+сверяет их с официальным фактом и копит статистику ошибок. Интерфейс — личный
+Telegram-бот с командами `/forecast` (прогноз на завтра), `/errors` (метрики
+качества по окнам 7д/30д/сезон/год), `/help`, `/start`. Подробная предметная
+документация — README.md (это исходный план проекта, он же спецификация).
+
+## Доменные правила (инварианты — не нарушать)
+
+1. **Сутки станции**: все «дни» — климатические сутки в зоне
+   `America/Los_Angeles` (local midnight → midnight, с учётом DST). Логика —
+   только через `app/timeutil.py`.
+2. **Температура хранится в °F** (нативные единицы NOAA); °C — только на
+   отображении.
+3. **Форматы дат в БД — ISO-строки**: дата `YYYY-MM-DD`, цикл модели и метки
+   времени `YYYY-MM-DDTHH:MMZ` (UTC). Лексикографический порядок = хронология —
+   на этом построены все `ORDER BY cycle`.
+4. **«Зачётный» прогноз дня** (для метрик) — последний цикл модели строго до
+   local midnight target-даты (`repo.official_forecast`). Для показа в боте —
+   просто самый свежий (`repo.latest_forecast`). Это разные вещи, не путать.
+5. **Приоритет фактов**: CLI (официальный климатический отчёт) всегда
+   перезаписывает METAR-фолбэк, но не наоборот (`repo.upsert_actual`).
+6. **Идемпотентность**: все записи — upsert'ы по естественным ключам; любой
+   джоб можно перезапускать без вреда.
+7. **Изоляция сбоев**: отказ одного источника/модели не роняет остальные
+   (`fetch_all_isolated`); ошибки уровня ERROR из `app.jobs`/`app.sources`
+   уходят алертами в Telegram владельцу.
+8. **Allowlist**: бот отвечает только chat_id из `ALLOWED_CHAT_IDS`; чужим не
+   отвечает вовсе (не подтверждаем существование бота).
+9. **Обработчики бота должны быть быстрыми** (< пары секунд): Telegram ждёт
+   ответ webhook ≤60 с, тяжёлые операции — только в джобах по таймеру.
+
+## Карта кода
+
+```
+handler.py            входы Yandex Cloud Functions: bot_webhook (Telegram) и job (fetch/verify)
+app/
+  main.py             legacy-вход: long polling + APScheduler (локальная отладка, GH Actions)
+  config.py           ВСЯ конфигурация: env-переменные, URL источников, расписания, константы станции
+  timeutil.py         климатические сутки LA: границы, la_today/la_tomorrow (UTC↔local, DST)
+  metrics.py          чистые агрегации ошибок (MAE, ME/bias, RMSE, hit rate) по окнам
+  sources/            скачивание+парсинг, БЕЗ записи в БД; каждый модуль возвращает чистые данные
+    __init__.py       ForecastPoint, ActualTmax, ParseError, http-хелперы, fetch_all_isolated
+    nbm.py mav.py met.py   прогнозы: бюллетени NBS (bulk ~28 МБ), GFSMAV, NAMMET
+    cli_report.py     факт: официальный CLI-отчёт CLILAX (канонический)
+    nws.py            факт-фолбэк: расчёт Tmax по METAR-наблюдениям api.weather.gov
+  db/
+    repo.py           фасад: выбирает реализацию по DB_BACKEND ('sqlite'|'ydb'); публичный API один
+    sqlite_repo.py    SQLite (локально/тесты); schema.sql — DDL
+    ydb_repo.py       YDB Serverless (прод в облаке); драйвер — singleton на процесс
+    daily_errors.py   ModelDayError + OPERATIONAL_SOURCE (единая таблица дневных ошибок)
+  jobs/
+    fetch_forecasts.py  сбор прогнозов текущего цикла (latest_cycle с лагом публикации)
+    verify.py           факт за вчера: CLI → фолбэк METAR
+    scheduler.py        legacy APScheduler для main.py (в облаке заменён таймер-триггерами)
+  bot/
+    handlers.py       команды; /forecast и /errors читают ТОЛЬКО из БД
+    formatting.py     весь HTML-текст сообщений
+    middleware.py     allowlist + алерты (async-вариант для polling, sync — для serverless)
+    live.py           legacy: «живой» забор прогноза; в webhook-режиме НЕ использовать
+scripts/
+  run_job.py          разовый запуск fetch/verify (использовался в GH Actions)
+  backfill.py         добор фактов за прошлые дни (CLI-архив + METAR)
+  backfill_daily_errors.py  импорт годовой истории из IEM MOS Archive + NCEI в model_daily_errors
+  init_ydb.py migrate_to_ydb.py set_webhook.py build_zip.py deploy.ps1   обслуживание облака (см. ниже)
+tests/                pytest; парсеры гоняются на образцах из tests/fixtures/, БД — sqlite ':memory:'
+```
+
+Слоистость строгая: `sources` не знают про БД; `jobs` — оркестрация
+source→repo; `metrics` — чистые функции; `bot` читает только `repo`/`metrics`.
+Новый код должен сохранять это разделение.
+
+## Модель данных
+
+Оперативные таблицы (пишутся джобами, читаются ботом):
+- `forecasts(target_date, model, cycle, tmax_f, fetched_at)` — PK/уникальность
+  `(target_date, model, cycle)`; все циклы всех моделей.
+- `actuals(date, tmax_f, source, fetched_at)` — PK `date`; source `CLI|METAR`.
+
+Единая таблица дневных ошибок (из неё читает `/errors`; агрегаты по окнам
+считает `app/metrics.py` на лету):
+- `model_daily_errors` — зачётный прогноз+факт+ошибка на день, PK
+  `(target_date, model)`. Два писателя: `scripts/backfill_daily_errors.py`
+  (интернет-архив IEM/NCEI) и verify-джоб (оперативные дни,
+  `forecast_source='OPERATIONAL'`). Оперативную строку архив не
+  перезаписывает (правило в `repo.upsert_daily_errors`).
+
+Схема живёт в ДВУХ местах: `app/db/schema.sql` (SQLite) и DDL в
+`ydb_repo.init_db` (YDB). Меняешь одну — меняй вторую и прогоняй
+`python -m scripts.init_ydb` для облака.
+
+## Режимы запуска
+
+| Режим | Как | Когда |
+|---|---|---|
+| Прод (облако) | функции из `handler.py`, webhook + таймер-триггеры | основной |
+| Локальная отладка | `python -m app.main` (long polling; снять webhook `set_webhook --delete`!) | разработка |
+| Разовый джоб локально | `python -m scripts.run_job fetch\|verify` | отладка джобов |
+| GH Actions (legacy) | воркфлоу в `.github/workflows/` | резерв до вывода из эксплуатации |
+
+Polling и webhook у Telegram взаимоисключающие: пока установлен webhook,
+локальный polling не получит апдейтов (и наоборот, поднятый polling собьёт
+доставку в облако). Всегда возвращай webhook после локальной отладки.
+
+## Конвенции и качество
+
+- Python ≥3.10, ruff (`line-length 100`, правила E4/E7/E9/F/I); комментарии и
+  докстринги — по-русски, в стиле существующих (объясняют «почему», не «что»).
+- Перед любым коммитом/деплоем: `python -m pytest -q` и `python -m ruff check .`
+  (зависимости — в `.venv`; тестам YDB не нужна, дефолтный бэкенд sqlite).
+- Типовые задачи:
+  - новая команда бота → `handlers.py` (+ `BOT_COMMANDS`) + `formatting.py`
+    (+ регистрация меню: перезапустить `set_webhook`); помнить про правило №9;
+  - новый источник данных → модуль в `sources/` по образцу соседей + фикстура
+    в `tests/fixtures/` + тест парсера;
+  - изменение схемы БД → schema.sql + ydb_repo.init_db + обе реализации repo +
+    `init_ydb` + редеплой;
+  - новая переменная окружения → `config.py` + `.env.example` + `deploy.ps1`
+    (блок `$envArgs`) + редеплой.
 
 ## Архитектура в облаке
 
@@ -13,7 +136,7 @@ Serverless. Классическая схема из README §13:
 |---|---|---|
 | Функция webhook | `la-weather-bot-webhook` (id `d4emlk08aqd9464fc39t`) | Апдейты Telegram, entrypoint `handler.bot_webhook`, timeout 120s |
 | Функция джобов | `la-weather-jobs` | fetch/verify, entrypoint `handler.job`, timeout 300s |
-| YDB Serverless | база `la-weather` | Таблицы `forecasts`, `actuals` (+ `historical_model_*`) |
+| YDB Serverless | база `la-weather` | Таблицы `forecasts`, `actuals`, `model_daily_errors` |
 | Таймер-триггеры | `la-weather-fetch`, `la-weather-verify` | cron UTC `30 5,11,17,23 ? * * *` и `0 16,22 ? * * *`, payload `{"job": "fetch"|"verify"}` |
 | Сервисный аккаунт | `la-weather-sa` (id `ajeg2rtbnjkrq6nmj38r`) | Роли `ydb.editor`, `functions.functionInvoker`; функции ходят в YDB через него |
 

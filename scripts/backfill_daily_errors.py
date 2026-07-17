@@ -1,9 +1,13 @@
-"""Импорт годовой истории MOS/NBM и метрик в отдельные архивные таблицы.
+"""Импорт годовой истории MOS/NBM в единую таблицу дневных ошибок.
 
 Прогнозы: Iowa Environmental Mesonet MOS Archive (исходные продукты NWS).
 Факт: NOAA NCEI Daily Summaries, KLAX/GHCN station USW00023174.
 
-Оперативные таблицы forecasts/actuals не читаются и не изменяются.
+Пишет в model_daily_errors — ту же таблицу, что наполняет verify-джоб
+оперативными днями; оперативные строки бэкфилл не перезаписывает (правило
+в repo.upsert_daily_errors), поэтому его можно безопасно перегонять.
+Оперативные таблицы forecasts/actuals не читаются и не изменяются;
+агрегаты по окнам считает app/metrics.py на лету при /errors.
 """
 
 from __future__ import annotations
@@ -13,13 +17,13 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlencode
 
-from app import metrics, timeutil
+from app import timeutil
 from app.db import repo
-from app.db.historical import HistoricalModelDay, HistoricalModelMetric
+from app.db.daily_errors import ModelDayError
 from app.sources import http_get_json
 
 UTC = timezone.utc
-log = logging.getLogger("backfill_historical_metrics")
+log = logging.getLogger("backfill_daily_errors")
 
 IEM_ENDPOINT = "https://mesonet.agron.iastate.edu/cgi-bin/request/mos.py"
 NCEI_ENDPOINT = "https://www.ncei.noaa.gov/access/services/data/v1"
@@ -140,14 +144,14 @@ def fetch_actual_history(start: date, end: date) -> dict[date, float]:
 def build_daily_rows(
     forecasts: dict[str, dict[date, tuple[datetime, float]]],
     actuals: dict[date, float],
-) -> list[HistoricalModelDay]:
-    rows: list[HistoricalModelDay] = []
+) -> list[ModelDayError]:
+    rows: list[ModelDayError] = []
     for model in IEM_MODELS:
         for target, (cycle, forecast_f) in sorted(forecasts[model].items()):
             if target not in actuals:
                 continue
             rows.append(
-                HistoricalModelDay(
+                ModelDayError(
                     target_date=target,
                     model=model,
                     cycle=cycle,
@@ -160,63 +164,6 @@ def build_daily_rows(
     return rows
 
 
-def build_metric_rows(
-    daily: list[HistoricalModelDay], period_start: date, period_end: date
-) -> list[HistoricalModelMetric]:
-    pairs_by_model = {
-        model: [
-            (row.target_date, row.forecast_tmax_f, row.actual_tmax_f)
-            for row in daily
-            if row.model == model
-        ]
-        for model in IEM_MODELS
-    }
-    return build_metric_rows_from_pairs(pairs_by_model, period_start, period_end)
-
-
-def build_metric_rows_from_pairs(
-    pairs_by_model: dict[str, list[tuple[date, float, float]]],
-    period_start: date,
-    period_end: date,
-) -> list[HistoricalModelMetric]:
-    """Собрать агрегаты из уже сохранённых архивных пар."""
-    out: list[HistoricalModelMetric] = []
-    for model in IEM_MODELS:
-        errors = [
-            metrics.DayError(target, forecast_f, actual_f)
-            for target, forecast_f, actual_f in pairs_by_model[model]
-        ]
-        stats = metrics.compute_window(errors, "archive", period_start, period_end)
-        if stats.n == 0:
-            log.warning("%s: нет полных архивных пар, метрика не записана", model)
-            continue
-        assert stats.mae is not None
-        assert stats.bias is not None
-        assert stats.rmse is not None
-        assert stats.hit_rate is not None
-        assert stats.max_abs_error is not None
-        assert stats.max_abs_error_date is not None
-        out.append(
-            HistoricalModelMetric(
-                model=model,
-                period_start=period_start,
-                period_end=period_end,
-                n=stats.n,
-                mae=stats.mae,
-                bias=stats.bias,
-                rmse=stats.rmse,
-                hit_rate_1f=stats.hit_rate[1.0],
-                hit_rate_2f=stats.hit_rate[2.0],
-                hit_rate_3f=stats.hit_rate[3.0],
-                max_abs_error=stats.max_abs_error,
-                max_abs_error_date=stats.max_abs_error_date,
-                forecast_source=FORECAST_SOURCE,
-                actual_source=ACTUAL_SOURCE,
-            )
-        )
-    return out
-
-
 def _parse_date(value: str) -> date:
     return date.fromisoformat(value)
 
@@ -227,16 +174,11 @@ def main() -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(
-        description="Импорт архивных MOS/NBM прогнозов, фактов и метрик."
+        description="Импорт архивных MOS/NBM прогнозов и фактов в model_daily_errors."
     )
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--start", type=_parse_date)
     parser.add_argument("--end", type=_parse_date)
-    parser.add_argument(
-        "--metrics-only",
-        action="store_true",
-        help="не скачивать архив, пересчитать агрегаты из historical_model_daily",
-    )
     args = parser.parse_args()
 
     if args.start or args.end:
@@ -249,59 +191,26 @@ def main() -> None:
         end = timeutil.la_today() - timedelta(days=1)
         start = end - timedelta(days=args.days - 1)
 
-    if args.metrics_only:
-        conn = repo.connect()
-        try:
-            pairs_by_model = {
-                model: repo.historical_error_series(conn, model, start, end)
-                for model in IEM_MODELS
-            }
-            available_dates = [
-                target for pairs in pairs_by_model.values() for target, _, _ in pairs
-            ]
-            aggregate_end = max(available_dates, default=end)
-            metric_rows = build_metric_rows_from_pairs(
-                pairs_by_model, start, aggregate_end
-            )
-            repo.upsert_historical_metrics(conn, metric_rows)
-        finally:
-            conn.close()
-        for row in metric_rows:
-            log.info(
-                "%s %s..%s: n=%d MAE=%.2f bias=%+.2f RMSE=%.2f "
-                "hit<=1/2/3F=%.1f/%.1f/%.1f%% max=%.1fF (%s)",
-                row.model, row.period_start, row.period_end,
-                row.n, row.mae, row.bias, row.rmse,
-                row.hit_rate_1f * 100, row.hit_rate_2f * 100,
-                row.hit_rate_3f * 100, row.max_abs_error,
-                row.max_abs_error_date,
-            )
-        return
-
     log.info("архивный импорт за %s..%s", start, end)
     actuals = fetch_actual_history(start, end)
     forecasts = {
         model: fetch_model_history(model, start, end) for model in IEM_MODELS
     }
     daily = build_daily_rows(forecasts, actuals)
-    aggregate_end = max((row.target_date for row in daily), default=end)
-    metric_rows = build_metric_rows(daily, start, aggregate_end)
 
     conn = repo.connect()
     try:
-        repo.init_db(conn)
-        repo.upsert_historical_days(conn, daily)
-        repo.upsert_historical_metrics(conn, metric_rows)
+        written = repo.upsert_daily_errors(conn, daily)
     finally:
         conn.close()
 
-    for row in metric_rows:
-        log.info(
-            "%s %s..%s: n=%d MAE=%.2f bias=%+.2f RMSE=%.2f hit<=2F=%.1f%%",
-            row.model, row.period_start, row.period_end, row.n,
-            row.mae, row.bias, row.rmse, row.hit_rate_2f * 100,
-        )
-    log.info("готово: historical_model_daily=%d, metrics=%d", len(daily), len(metric_rows))
+    for model in IEM_MODELS:
+        log.info("%s: архивных дней собрано — %d",
+                 model, sum(1 for row in daily if row.model == model))
+    skipped = len(daily) - written
+    log.info("готово: записано %d строк%s", written,
+             f", пропущено {skipped} (оперативные дни не перезаписываются)"
+             if skipped else "")
 
 
 if __name__ == "__main__":

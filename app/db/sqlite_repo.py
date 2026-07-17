@@ -16,7 +16,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app import config, timeutil
-from app.db.historical import HistoricalModelDay, HistoricalModelMetric
+from app.db.daily_errors import OPERATIONAL_SOURCE, ModelDayError
 from app.sources import ActualTmax, ForecastPoint
 
 UTC = timezone.utc
@@ -243,18 +243,47 @@ def error_series(
     ]
 
 
-# --- Изолированный интернет-архив -----------------------------------------
+# --- Единая таблица дневных ошибок ------------------------------------------
 
-def upsert_historical_days(
-    conn: sqlite3.Connection, rows: list[HistoricalModelDay]
+def _protected_daily_keys(
+    conn: sqlite3.Connection, lo: str, hi: str
+) -> set[tuple[str, str]]:
+    """Ключи оперативных строк диапазона — их архиву перезаписывать нельзя."""
+    rows = conn.execute(
+        """
+        SELECT target_date, model FROM model_daily_errors
+        WHERE forecast_source = ? AND target_date BETWEEN ? AND ?
+        """,
+        (OPERATIONAL_SOURCE, lo, hi),
+    ).fetchall()
+    return {(row["target_date"], row["model"]) for row in rows}
+
+
+def upsert_daily_errors(
+    conn: sqlite3.Connection, rows: list[ModelDayError]
 ) -> int:
-    """Идемпотентно записать дневные архивные пары, не трогая live-таблицы."""
+    """Идемпотентно записать дневные ошибки; вернуть число записанных строк.
+
+    Правило конфликтов (аналог «CLI приоритетнее METAR» в actuals): оперативная
+    строка (forecast_source=OPERATIONAL_SOURCE) не может быть затёрта архивной;
+    оперативная перезаписывает любую — повторная верификация уточняет факт
+    (METAR -> CLI). Фильтрация — в Python, одинаково с ydb_repo.
+    """
+    if not rows:
+        return 0
+    dates = [_fmt_date(row.target_date) for row in rows]
+    protected = _protected_daily_keys(conn, min(dates), max(dates))
+    to_write = [
+        row for row in rows
+        if row.forecast_source == OPERATIONAL_SOURCE
+        or (_fmt_date(row.target_date), row.model) not in protected
+    ]
     now = _now_iso()
     conn.executemany(
         """
-        INSERT INTO historical_model_daily (
+        INSERT INTO model_daily_errors (
             target_date, model, cycle, forecast_tmax_f, actual_tmax_f,
-            error_f, abs_error_f, forecast_source, actual_source, imported_at
+            error_f, abs_error_f, forecast_source, actual_source, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(target_date, model) DO UPDATE SET
             cycle           = excluded.cycle,
@@ -264,7 +293,7 @@ def upsert_historical_days(
             abs_error_f     = excluded.abs_error_f,
             forecast_source = excluded.forecast_source,
             actual_source   = excluded.actual_source,
-            imported_at     = excluded.imported_at
+            updated_at      = excluded.updated_at
         """,
         [
             (
@@ -273,63 +302,21 @@ def upsert_historical_days(
                 float(row.error_f), float(row.abs_error_f),
                 row.forecast_source, row.actual_source, now,
             )
-            for row in rows
+            for row in to_write
         ],
     )
     conn.commit()
-    return len(rows)
+    return len(to_write)
 
 
-def upsert_historical_metrics(
-    conn: sqlite3.Connection, rows: list[HistoricalModelMetric]
-) -> int:
-    """Идемпотентно сохранить агрегаты архивного периода."""
-    now = _now_iso()
-    conn.executemany(
-        """
-        INSERT INTO historical_model_metrics (
-            model, period_start, period_end, n, mae, bias, rmse,
-            hit_rate_1f, hit_rate_2f, hit_rate_3f,
-            max_abs_error, max_abs_error_date,
-            forecast_source, actual_source, computed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(model, period_start, period_end) DO UPDATE SET
-            n                  = excluded.n,
-            mae                = excluded.mae,
-            bias               = excluded.bias,
-            rmse               = excluded.rmse,
-            hit_rate_1f        = excluded.hit_rate_1f,
-            hit_rate_2f        = excluded.hit_rate_2f,
-            hit_rate_3f        = excluded.hit_rate_3f,
-            max_abs_error      = excluded.max_abs_error,
-            max_abs_error_date = excluded.max_abs_error_date,
-            forecast_source    = excluded.forecast_source,
-            actual_source      = excluded.actual_source,
-            computed_at        = excluded.computed_at
-        """,
-        [
-            (
-                row.model, _fmt_date(row.period_start), _fmt_date(row.period_end),
-                row.n, row.mae, row.bias, row.rmse,
-                row.hit_rate_1f, row.hit_rate_2f, row.hit_rate_3f,
-                row.max_abs_error, _fmt_date(row.max_abs_error_date),
-                row.forecast_source, row.actual_source, now,
-            )
-            for row in rows
-        ],
-    )
-    conn.commit()
-    return len(rows)
-
-
-def historical_error_series(
+def daily_error_series(
     conn: sqlite3.Connection, model: str, start: date, end: date
 ) -> list[tuple[date, float, float]]:
-    """Архивные (дата, прогноз, факт), полностью отдельно от live-данных."""
+    """(дата, прогноз, факт) модели из единой таблицы за [start, end]."""
     rows = conn.execute(
         """
         SELECT target_date, forecast_tmax_f, actual_tmax_f
-        FROM historical_model_daily
+        FROM model_daily_errors
         WHERE model = ? AND target_date BETWEEN ? AND ?
         ORDER BY target_date
         """,

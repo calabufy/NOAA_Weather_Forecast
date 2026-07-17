@@ -91,15 +91,13 @@ async def cmd_errors(message: Message) -> None:
     earliest = min(start for start, _ in bounds.values())
     end = max(end for _, end in bounds.values())  # вчера (за сегодня факта нет)
 
+    # Единая таблица model_daily_errors за всё время: архивный бэкфилл +
+    # оперативные дни от verify-джоба. Окна считает metrics.report на лету.
     conn = repo.connect()
     try:
-        actuals = repo.list_actuals(conn, earliest, end)
         reports = {
             model: metrics.report(
-                repo.error_series(
-                    conn, model, earliest, end, actuals=actuals
-                ),
-                ref,
+                repo.daily_error_series(conn, model, earliest, end), ref
             )
             for model in config.BOT_MODELS
         }

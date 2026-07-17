@@ -27,7 +27,7 @@ def main() -> None:
     finally:
         conn.close()
     log.info(
-        "таблицы forecasts/actuals и historical_model_* созданы "
+        "таблицы forecasts/actuals и model_daily_errors созданы "
         "(или уже существовали)"
     )
 
