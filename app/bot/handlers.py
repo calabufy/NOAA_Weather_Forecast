@@ -1,6 +1,6 @@
 # handlers.py — обработчики команд бота.
 # /start (краткий help), /forecast (прогноз Tmax на завтра по моделям),
-# /errors (таблица метрик по окнам). Берёт данные из repo и metrics.
+# /errors (таблица метрик по окнам), /chart (график сравнения моделей).
 #
 # Данные читаются из SQLite: на каждый запрос открываем своё короткоживущее
 # соединение и закрываем его (repo.connect идемпотентен и дёшев для SQLite) —
@@ -10,15 +10,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import date
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, BufferedInputFile, LinkPreviewOptions, Message
 
 from app import config, metrics, timeutil
-from app.bot import formatting
+from app.bot import charts, formatting
 from app.db import repo
+from app.sources import polymarket
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -28,6 +31,7 @@ router = Router()
 BOT_COMMANDS = [
     BotCommand(command="forecast", description="Прогноз Tmax на завтра (NBM, MAV, MET)"),
     BotCommand(command="errors", description="Метрики ошибок по окнам"),
+    BotCommand(command="chart", description="График метрик NBM, MAV и MET"),
     BotCommand(command="help", description="Справка: модели, метрики, циклы"),
     BotCommand(command="start", description="Краткая справка"),
 ]
@@ -41,6 +45,7 @@ _START = (
     "Прогноз Tmax по станции KLAX (Лос-Анджелес) и статистика ошибок моделей.\n\n"
     "<b>/forecast</b> — прогноз максимума на завтра (NBM, MAV, MET).\n"
     "<b>/errors</b> — метрики качества по окнам 7д/30д/сезон/год.\n"
+    "<b>/chart</b> — график сравнения качества моделей.\n"
     "<b>/help</b> — подробная справка: модели, метрики, расписание циклов."
 )
 
@@ -79,12 +84,33 @@ async def cmd_forecast(message: Message) -> None:
     if not any(points.values()):
         await message.answer("Прогноз на завтра ещё не собран, попробуйте позже.")
         return
-    await message.answer(formatting.format_forecast(target, points))
+
+    # Блок рынка Polymarket — best-effort: сбой/отсутствие события не должны
+    # лишить пользователя прогноза. Забор блокирующий (httpx) — через to_thread.
+    market = None
+    try:
+        market = await asyncio.to_thread(polymarket.fetch_market, target)
+    except Exception:  # noqa: BLE001 — рынок вторичен, прогноз важнее
+        log.warning("polymarket недоступен — блок рынка пропущен", exc_info=True)
+
+    text = formatting.format_forecast(target, points)
+    if market is not None:
+        text += "\n\n" + formatting.format_market(market, points)
+    # Превью ссылки отключаем: иначе Telegram приклеит большую карточку рынка.
+    await message.answer(
+        text, link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
 
 
 @router.message(Command("errors"))
 async def cmd_errors(message: Message) -> None:
     ref = timeutil.la_today()
+    reports = _read_metric_reports(ref)
+    await message.answer(formatting.format_errors(reports))
+
+
+def _read_metric_reports(ref: date) -> charts.Reports:
+    """Прочитать единый ряд ошибок и посчитать те же агрегаты для текста и PNG."""
     # Самое дальнее начало среди всех окон — тянем ряд ошибок один раз на модель
     # за этот диапазон, а metrics.report сам режет его по окнам.
     bounds = metrics.window_bounds(ref)
@@ -103,4 +129,27 @@ async def cmd_errors(message: Message) -> None:
         }
     finally:
         conn.close()
-    await message.answer(formatting.format_errors(reports))
+    return reports
+
+
+@router.message(Command("chart"))
+async def cmd_chart(message: Message) -> None:
+    ref = timeutil.la_today()
+    try:
+        reports = _read_metric_reports(ref)
+        if not charts.has_data(reports):
+            await message.answer("Для графика пока недостаточно данных.")
+            return
+        png = charts.render_metrics_chart(reports, ref)
+        end = metrics.window_bounds(ref)["year"][1]
+        photo = BufferedInputFile(png, filename=f"klax-metrics-{end.isoformat()}.png")
+        await message.answer_photo(
+            photo,
+            caption=(
+                f"Метрики моделей KLAX по {end.isoformat()} включительно. "
+                "Точные значения и объём выборки: /errors"
+            ),
+        )
+    except Exception:  # noqa: BLE001 — пользователь должен получить ответ при сбое
+        log.exception("сбой /chart")
+        await message.answer("Не удалось построить график, попробуйте позже.")

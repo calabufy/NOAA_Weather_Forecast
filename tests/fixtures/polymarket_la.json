@@ -1,0 +1,64 @@
+[
+ {
+  "slug": "highest-temperature-in-los-angeles-on-july-18-2026",
+  "title": "Highest temperature in Los Angeles on July 18?",
+  "volume": 11412.084257999999,
+  "markets": [
+   {
+    "groupItemTitle": "69°F or below",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0055\", \"0.9945\"]"
+   },
+   {
+    "groupItemTitle": "70-71°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0035\", \"0.9965\"]"
+   },
+   {
+    "groupItemTitle": "72-73°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0205\", \"0.9795\"]"
+   },
+   {
+    "groupItemTitle": "74-75°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.165\", \"0.835\"]"
+   },
+   {
+    "groupItemTitle": "76-77°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.455\", \"0.545\"]"
+   },
+   {
+    "groupItemTitle": "78-79°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.305\", \"0.695\"]"
+   },
+   {
+    "groupItemTitle": "80-81°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.068\", \"0.932\"]"
+   },
+   {
+    "groupItemTitle": "82-83°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0005\", \"0.9995\"]"
+   },
+   {
+    "groupItemTitle": "84-85°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0005\", \"0.9995\"]"
+   },
+   {
+    "groupItemTitle": "86-87°F",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.001\", \"0.999\"]"
+   },
+   {
+    "groupItemTitle": "88°F or higher",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.0005\", \"0.9995\"]"
+   }
+  ]
+ }
+]

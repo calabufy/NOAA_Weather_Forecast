@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from app import config, timeutil
 from app.metrics import HIT_THRESHOLDS_F, WINDOWS, WindowStats
 from app.sources import ForecastPoint
+from app.sources.polymarket import TempMarket
 from app.timeutil import LA
 
 # Человекочитаемые подписи окон (порядок совпадает с metrics.WINDOWS).
@@ -67,6 +68,40 @@ def format_forecast(
             lines.append(
                 f"{model}: {temp_label(fp.tmax_f)}, цикл {cycle_label(fp.cycle)}"
             )
+    return "\n".join(lines)
+
+
+# --- Блок Polymarket под /forecast ------------------------------------------
+
+# Ширина бара самой вероятной корзины; остальные масштабируются от неё.
+_MARKET_BAR_WIDTH = 8
+
+
+def format_market(market: TempMarket, points: dict[str, ForecastPoint | None]) -> str:
+    """Гистограмма корзин рынка Tmax LA + маркеры моделей + ссылка на рынок.
+
+    Бар — вероятность рынка (цена Yes), масштаб от самой дорогой корзины.
+    Маркер модели ставится у корзины, куда попадает её округлённый прогноз.
+    Рынок судится по той же станции (LAX), что и прогноз, поэтому сравнение
+    корректно. Ссылка в конце — на публичную страницу события.
+    """
+    head = (f"Polymarket: Tmax LA — {date_label(market.target_date)}"
+            f" · объём ${market.volume / 1000:.1f}k")
+    max_prob = max((b.prob for b in market.buckets), default=0.0) or 1.0
+    lines = [f"<b>{html.escape(head)}</b>", "<pre>"]
+    for bucket in market.buckets:
+        bar = "▇" * max(1, round(bucket.prob / max_prob * _MARKET_BAR_WIDTH))
+        marks = " ".join(
+            model for model, fp in points.items()
+            if fp is not None and bucket.contains(fp.tmax_f)
+        )
+        label = bucket.label.replace("°F", "°")
+        line = f"{html.escape(label):>13} {bar:<{_MARKET_BAR_WIDTH}} {bucket.prob * 100:3.0f}%"
+        if marks:
+            line += f"  ← {html.escape(marks)}"
+        lines.append(line)
+    lines.append("</pre>")
+    lines.append(f'<a href="{html.escape(market.url, quote=True)}">Открыть рынок на Polymarket</a>')
     return "\n".join(lines)
 
 
@@ -189,10 +224,11 @@ def format_help(ref: date | None = None) -> str:
         "• <b>/forecast</b> — прогноз Tmax на завтра по NBM, MAV и MET (°F и °C, "
         "с указанием цикла модели).\n"
         "• <b>/errors</b> — метрики качества прогнозов по окнам (см. ниже).\n"
+        "• <b>/chart</b> — график сравнения MAE, RMSE, ME и hit-rate моделей.\n"
         "• <b>/help</b> — эта справка.\n"
         "• <b>/start</b> — краткая справка.\n\n"
 
-        "<b>Метрики (/errors)</b>\n"
+        "<b>Метрики (/errors и /chart)</b>\n"
         "Для каждого дня «зачётный» прогноз сравнивается с фактом (Tmax из "
         "CLI-отчёта NWS, при отсутствии — расчёт по METAR). Ошибка дня = "
         "прогноз − факт (°F). Агрегаты по каждой модели:\n"

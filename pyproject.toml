@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",       # HTTP-клиент (sync + streaming для bulk-файлов NBS)
     "tenacity>=8.2",     # ретраи с экспоненциальным бэкоффом на внешние запросы
     "aiogram>=3.4",      # Telegram-бот (long polling) — Фаза 4
+    "pillow>=10.4",      # лёгкий PNG-график метрик для команды /chart
     "apscheduler>=3.10", # планировщик джобов fetch/verify — Фаза 2
     "python-dotenv>=1.0", # загрузка .env в окружение при локальном запуске
     "ydb>=3.18",         # YDB Serverless (DB_BACKEND=ydb в Yandex Cloud) — Фаза 6

@@ -158,6 +158,23 @@ TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "")
 # Модели, показываемые в боте (порядок = порядок вывода; NBM — основной).
 BOT_MODELS = ("NBM", "MAV", "MET")
 
+# --- Polymarket (блок рынка в /forecast) -------------------------------------
+# Дневной рынок «Highest temperature in Los Angeles» (судится по станции LAX —
+# см. app/sources/polymarket.py). Слаг: {month}=июльский 'july', {day}=без нуля.
+POLYMARKET_SLUG_TEMPLATE = os.getenv(
+    "POLYMARKET_SLUG_TEMPLATE",
+    "highest-temperature-in-los-angeles-on-{month}-{day}-{year}",
+)
+POLYMARKET_EVENTS_URL = os.getenv(
+    "POLYMARKET_EVENTS_URL", "https://gamma-api.polymarket.com/events?slug={slug}"
+)
+POLYMARKET_PAGE_URL = os.getenv(
+    "POLYMARKET_PAGE_URL", "https://polymarket.com/event/{slug}"
+)
+# Таймаут короткий: рынок тянется в интерактивном /forecast, при сбое блок
+# просто не показывается (прогноз важнее).
+POLYMARKET_TIMEOUT = float(os.getenv("POLYMARKET_TIMEOUT", "5"))
+
 # Кэш ленивого забора /forecast (app/bot/live.py): сколько секунд переиспользовать
 # уже скачанный прогноз, чтобы не тянуть бюллетени (NBS ~28 МБ) на каждый запрос.
 # Новый цикл сбрасывает кэш независимо от TTL (ключ кэша включает цикл).
